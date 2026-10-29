@@ -245,9 +245,30 @@ async function enterWithDevice(){
 // sign out and make this device forget the vault: next visit needs the Master Key
 async function forget(){
   const uid = user?.uid;
+  const dropped = session && !data.items.length && await dropIfEmpty();
   clearSession();
   if (uid) await deviceKeys.del(uid);
-  try { await fb.signOut(auth); } catch {}
+  if (!dropped) try { await fb.signOut(auth); } catch {}
+}
+// Leaving an empty vault (typically a mistyped Key): remove its doc, its Firebase account and the local copy.
+// Nothing is lost — the same Key simply starts a new vault. Checked against the cloud first, and skipped when offline.
+async function dropIfEmpty(){
+  try {
+    if (syncing) await syncing;
+    const s = session;
+    if (!s || data.items.length || dirty || !navigator.onLine) return false;
+    const remote = await fetchRemote();
+    if (remote && (remote.salt !== b64(s.salt) || (await unseal(s.meta, remote)).items.length)) return false;
+    const u = auth.currentUser, uid = user.uid;
+    clearSession();                       // stops the watcher and any further pushes
+    if (remote) await fb.deleteDoc(ref());
+    try { localStorage.removeItem('vault.v1:' + uid); } catch {}
+    delete mem['vault.v1:' + uid];
+    // deleting the account needs a recent login; if refused, an empty account with no data is left, which holds nothing
+    try { await u.delete(); } catch (e) { console.warn(e); await fb.signOut(auth); }
+    toast('ตู้ว่าง ลบออกแล้ว');
+    return true;
+  } catch (e) { console.warn(e); return false; }
 }
 
 // ---------- login with the Master Key ----------

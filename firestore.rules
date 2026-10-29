@@ -23,7 +23,8 @@ service cloud.firestore {
       allow create: if isOwner() && validBlob();
       // IV ต้องเปลี่ยนทุกครั้งที่เขียน (กัน IV ซ้ำ)
       allow update: if isOwner() && validBlob() && request.resource.data.iv != resource.data.iv;
-      allow delete: if false;
+      // แอปลบเฉพาะตู้ที่ว่างตอนออกจากตู้ (ข้อมูลเข้ารหัสอยู่ เซิร์ฟเวอร์ตรวจไม่ได้ว่าว่างจริง จึงให้สิทธิ์เจ้าของ)
+      allow delete: if isOwner();
     }
 
     match /{document=**} {
