@@ -188,9 +188,13 @@ details summary{cursor:pointer;font-weight:500}
       <label>หมายเหตุ (ไม่บังคับ)
         <input id="fNote" autocomplete="off">
       </label>
-      <label id="fKeyRow" hidden>Master Key (ใช้เข้ารหัสรหัสผ่านนี้)
-        <input id="fKey" type="password" autocomplete="off">
+      <label><span id="fKeyLabel">Key ของรายการนี้ (ใช้ดูรหัสผ่าน)</span>
+        <input id="fKey" type="password" autocomplete="new-password" placeholder="อย่างน้อย 6 ตัวอักษร">
       </label>
+      <label>พิมพ์ Key ของรายการอีกครั้ง
+        <input id="fKey2" type="password" autocomplete="new-password">
+      </label>
+      <p class="muted" style="font-size:.82rem">ถ้าลืม Key ของรายการ จะดูรหัสผ่านนี้ไม่ได้อีก แต่ยังลบรายการด้วย Master Key ได้</p>
       <div class="err" id="editErr"></div>
       <div class="row">
         <button class="primary" type="submit">บันทึก</button>
@@ -220,7 +224,7 @@ details summary{cursor:pointer;font-weight:500}
         </div>
       </div>
     </details>
-    <p>ดู แก้ไข หรือลบรหัสผ่านต้องใส่ Master Key ทุกครั้ง รหัสที่แสดงจะซ่อนเองใน 5 วินาที</p>
+    <p>แต่ละรายการมี Key ของตัวเอง ดูหรือแก้ไขรหัสผ่านต้องใส่ Key ของรายการนั้นทุกครั้ง รหัสที่แสดงจะซ่อนเองใน 5 วินาที รายการเก่าที่ยังไม่ได้ตั้ง Key แยกใช้ Master Key</p>
     <p>เครื่องนี้จำตู้ไว้เพื่อแสดงรายการโดยไม่ต้องใส่ Key กด “ออกจากระบบ” เพื่อให้เครื่องลืม</p>
   </div>
 </div>

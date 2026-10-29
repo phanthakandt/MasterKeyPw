@@ -4,7 +4,8 @@
 // v3 (two layers): PBKDF2(Master Key, salt, 600k) → 256 bits → HKDF →
 //   meta key: seals the payload {items:[{id, site, user, note, mt, pw}], tomb:{id: deletedAtMs}}
 //             (this key may be remembered on a device so the list opens without the Master Key)
-//   pw key:   seals each password separately as pw = {iv, ct}; never stored, re-derived on every use
+//   pw key:   seals passwords of items that have no Key of their own (pw = {iv, ct}); never stored
+// Items with their own Key: pw = {salt, iv, ct} under PBKDF2(item Key, item salt) — see sealItem/openItem.
 // v1/v2 (legacy): the whole vault, passwords in clear, sealed with the PBKDF2 key directly.
 export const ITER = 600000, FORMAT = 3;
 const TOMB_TTL = 365 * 24 * 3600 * 1000;
@@ -81,10 +82,31 @@ export async function openVault(pass, blob){
   return {keys, salt, data:{items, tomb:o.tomb}, upgraded:true};
 }
 
-// re-encrypt every password from one pw key to another (vault moving to another salt / Master Key)
+// Per-item keys: pw = {salt, iv, ct}, sealed under PBKDF2(item Key, item salt, 600k) → HKDF.
+// A pw without `salt` predates per-item keys and is sealed under the vault's pw key (i.e. the Master Key).
+async function itemKeyFrom(pass, salt){
+  const hk = await crypto.subtle.importKey('raw', await pbkdf2Bits(pass, salt), 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({name:'HKDF', hash:'SHA-256', salt:new Uint8Array(32), info:enc.encode('vault/item/v3')},
+    hk, AES, false, ['encrypt','decrypt']);
+}
+// k = {key, salt|null} as returned by openItem: re-seal under the same item key (fresh IV)
+export async function resealItem(k, text){
+  return {...(k.salt ? {salt: k.salt} : {}), ...await encrypt(k.key, text)};
+}
+export async function sealItem(pass, text){
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  return resealItem({key: await itemKeyFrom(pass, salt), salt: b64(salt)}, text);
+}
+export async function openItem(pass, pw, vaultSalt){
+  const key = pw.salt ? await itemKeyFrom(pass, unb64(pw.salt)) : (await deriveKeys(pass, vaultSalt)).pw;
+  return {text: await decrypt(key, pw), k: {key, salt: pw.salt || null}};
+}
+
+// re-encrypt the Master-Key-sealed passwords from one pw key to another (vault moving to another salt / Master Key);
+// passwords with their own item Key don't depend on the vault and stay as they are
 export async function rekey(data, fromPw, toPw){
   const items = await Promise.all(data.items.map(async it =>
-    it.pw ? {...it, pw: await sealPw(toPw, await openPw(fromPw, it.pw))} : it));
+    it.pw && !it.pw.salt ? {...it, pw: await sealPw(toPw, await openPw(fromPw, it.pw))} : it));
   return {items, tomb:{...data.tomb}};
 }
 

@@ -1,8 +1,8 @@
 // UI + Firebase sync. Only sealed blobs {v, iter, salt, iv, ct} ever leave this file; the Master Key and plaintext stay in memory.
 // The Master Key is the only thing the user types: it derives the Firebase login (vault-core loginCreds) and the vault keys.
 // Two layers (see vault-core.js): the meta key opens the list and is remembered per device in IndexedDB (non-extractable);
-// each password needs the Master Key typed again, and the derived password key is dropped right after use.
-import { ITER, b64, unb64, loginCreds, deriveKeys, seal, unseal, sealPw, openPw, openVault, rekey, isBlob, merge, sameData } from './vault-core.js';
+// each password is sealed under its own item Key, typed on every use; derived keys are dropped right after.
+import { ITER, b64, unb64, loginCreds, deriveKeys, seal, unseal, sealItem, resealItem, openItem, openVault, rekey, isBlob, merge, sameData } from './vault-core.js';
 import { firebaseConfig } from './firebase-config.js';
 
 const FB = 'https://www.gstatic.com/firebasejs/10.14.1/';
@@ -20,7 +20,7 @@ let replace = false;  // next push overwrites remote without the version check (
 let rev = 0;          // bumps on every local change, so a push that raced with an edit doesn't clear `dirty`
 let lastRemote;       // undefined = unknown, null = no doc, else blob
 let pendingRemote = null, keyConflict = null;
-let editingId = null, editPw = null, unwatch = null;   // editPw: password key held only while the editor is open
+let editingId = null, editKey = null, unwatch = null;  // editKey: the item's key, held only while its editor is open
 let revealed = new Map(), authFails = 0;               // item id → {text, timer}
 let loggingIn = false, pendingCreate = null;           // pendingCreate: {pass, cred} while asking to confirm a new vault
 let auth, db, fb;
@@ -193,7 +193,7 @@ function clearSession(){
   stopWatch(); clearTimeout(retryTimer);
   for (const r of revealed.values()) clearTimeout(r.timer);
   revealed.clear(); authFails = 0;
-  session = null; data = {items:[], tomb:{}}; editingId = null; editPw = null; keyConflict = null; pendingRemote = null;
+  session = null; data = {items:[], tomb:{}}; editingId = null; editKey = null; keyConflict = null; pendingRemote = null;
   $('list').innerHTML = ''; $('editForm').hidden = true; $('cfKey').value = '';
   $('conflictPanel').hidden = true;
 }
@@ -364,7 +364,7 @@ $('signOutBtn').addEventListener('click', forget);
 
 function enterVault(){ show('vault'); render(); startWatch(); sync(); }
 
-// ---------- Master Key check for reveal / add / edit / delete ----------
+// ---------- Master Key check (delete fallback, key conflict, restore) ----------
 // derive from the typed pass + this vault's salt; correct iff the derived meta key opens something sealed with ours
 async function checkKey(pass){
   const s = session;
@@ -450,7 +450,7 @@ function render(){
           <span class="k">User</span><span class="v">${esc(i.user) || '<span class="muted">—</span>'}</span><span class="c">คัดลอก</span>
         </button>
         <div class="pw-row">
-          <button class="chip" data-act="copy" data-f="pass" title="${shown ? 'คลิกเพื่อคัดลอกรหัสผ่าน' : 'ใส่ Master Key เพื่อดูและคัดลอกรหัสผ่าน'}">
+          <button class="chip" data-act="copy" data-f="pass" title="${shown ? 'คลิกเพื่อคัดลอกรหัสผ่าน' : 'ใส่ Key ของรายการนี้เพื่อดูและคัดลอกรหัสผ่าน'}">
             <span class="k">Pass</span><span class="v">${none ? '<span class="muted">—</span>' : shown ? esc(shown.text) : '••••••••••'}</span><span class="c">${none ? '' : shown ? 'คัดลอก' : 'ดูรหัส'}</span>
           </button>
           ${none ? '' : `<button class="ghost" data-act="peek" aria-label="${shown ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}">${shown ? 'ซ่อน' : 'ดู'}</button>`}
@@ -459,7 +459,7 @@ function render(){
       ${i.note ? `<div class="item-note">${esc(i.note)}</div>` : ''}
       <form class="confirm auth" data-auth hidden>
         <span data-authlabel style="flex-basis:100%"></span>
-        <input type="password" autocomplete="off" placeholder="Master Key" aria-label="Master Key">
+        <input type="password" autocomplete="off" placeholder="Key" aria-label="Key">
         <button class="primary" type="submit">ยืนยัน</button>
         <button type="button" data-act="authno">ยกเลิก</button>
         <span class="err" data-autherr></span>
@@ -468,12 +468,18 @@ function render(){
 }
 $('search').addEventListener('input', render);
 
-const AUTH_LABEL = {reveal: () => 'ใส่ Master Key เพื่อดูรหัสผ่าน', edit: () => 'ใส่ Master Key เพื่อแก้ไข',
-  del: item => `ใส่ Master Key เพื่อลบ “${item.site}” ถาวร`};
+// which Key opens this item: its own, or the Master Key (no password, or an item from before per-item Keys)
+const keyName = item => item.pw?.salt ? 'Key ของรายการนี้' : 'Master Key';
+const AUTH_LABEL = {
+  reveal: item => `ใส่ ${keyName(item)} เพื่อดูรหัสผ่าน`,
+  edit: item => `ใส่ ${keyName(item)} เพื่อแก้ไข`,
+  del: item => `ใส่ ${item.pw?.salt ? 'Key ของรายการนี้ หรือ Master Key' : 'Master Key'} เพื่อลบ “${item.site}” ถาวร`,
+};
 function askKey(card, item, then){
   const f = card.querySelector('[data-auth]');
   f.dataset.then = then; f.hidden = false;
   f.querySelector('[data-authlabel]').textContent = AUTH_LABEL[then](item);
+  f.querySelector('input').placeholder = then === 'del' ? 'Key' : keyName(item);
   f.querySelector('[type=submit]').className = then === 'del' ? 'danger' : 'primary';
   f.querySelector('[type=submit]').textContent = then === 'del' ? 'ลบเลย' : 'ยืนยัน';
   f.querySelector('[data-autherr]').textContent = '';
@@ -513,25 +519,24 @@ $('list').addEventListener('submit', async e => {
   const f = e.target.closest('[data-auth]'); if (!f) return;
   e.preventDefault();
   const id = f.closest('.item').dataset.id, input = f.querySelector('input'), btn = f.querySelector('[type=submit]');
-  const label = btn.textContent;
+  const label = btn.textContent, pass = input.value, then = f.dataset.then, s = session;
+  const item = data.items.find(i => i.id === id); if (!item) return render();
   btn.disabled = true; btn.textContent = 'กำลังตรวจ…';
-  const keys = await checkKey(input.value);
+  let opened = null, ok = false;
+  if (item.pw && pass){ try { opened = await openItem(pass, item.pw, s.salt); ok = true; } catch {} }
+  // nothing to open (no password), or deleting with the Master Key when the item's own Key is forgotten
+  if (!ok && (!item.pw || then === 'del')) ok = !!(await checkKey(pass));
   input.value = ''; btn.disabled = false; btn.textContent = label;
-  if (!keys){
+  if (session !== s) return;
+  if (!ok){
     if (authFailed()) return;
     f.querySelector('[data-autherr]').textContent = 'Key ไม่ถูกต้อง';
     return input.focus();
   }
   authFails = 0;
-  const item = data.items.find(i => i.id === id); if (!item) return render();
-  let text = '';
-  if (item.pw && f.dataset.then !== 'del'){
-    try { text = await openPw(keys.pw, item.pw); }
-    catch { f.querySelector('[data-autherr]').textContent = 'ถอดรหัสรายการนี้ไม่ได้'; return; }
-  }
-  if (f.dataset.then === 'reveal'){ reveal(id, text); render(); }
-  if (f.dataset.then === 'edit'){ f.hidden = true; openEditor(item, text, keys.pw); }
-  if (f.dataset.then === 'del'){
+  if (then === 'reveal'){ reveal(id, opened.text); render(); }
+  if (then === 'edit'){ f.hidden = true; openEditor(item, opened?.text || '', opened?.k || null); }
+  if (then === 'del'){
     conceal(id);
     data.items = data.items.filter(i => i.id !== id);
     data.tomb[id] = Date.now();
@@ -549,18 +554,19 @@ async function copy(text){
 }
 
 // ---------- editor ----------
-// editing arrives already authenticated (pwKey); adding asks for the Master Key inside the form, only if a password is set
+// editing arrives already unlocked (k = the item's key); a new Key can be set here, otherwise the current one is kept
+const MIN_ITEM_KEY = 6;
 let editOrigPass = '';
-function openEditor(item, pass = '', pwKey = null){
-  editingId = item ? item.id : null; editPw = pwKey; editOrigPass = pass;
+function openEditor(item, pass = '', k = null){
+  editingId = item ? item.id : null; editKey = k; editOrigPass = pass;
   $('editTitle').textContent = item ? 'แก้ไขรายการ' : 'เพิ่มรายการ';
   $('fSite').value = item?.site || ''; $('fUser').value = item?.user || '';
-  $('fPass').value = pass; $('fNote').value = item?.note || ''; $('fKey').value = '';
-  $('fKeyRow').hidden = !!pwKey;
+  $('fPass').value = pass; $('fNote').value = item?.note || ''; $('fKey').value = $('fKey2').value = '';
+  $('fKeyLabel').textContent = k ? 'เปลี่ยน Key ของรายการนี้ (เว้นว่างเพื่อใช้ Key เดิม)' : 'Key ของรายการนี้ (ใช้ดูรหัสผ่าน)';
   $('editErr').textContent = '';
   $('editForm').hidden = false; $('fSite').focus();
 }
-function closeEditor(){ $('editForm').hidden = true; $('fPass').value = $('fKey').value = ''; editPw = null; editingId = null; editOrigPass = ''; }
+function closeEditor(){ $('editForm').hidden = true; $('fPass').value = $('fKey').value = $('fKey2').value = ''; editKey = null; editingId = null; editOrigPass = ''; }
 $('addBtn').addEventListener('click', () => openEditor(null));
 $('cancelBtn').addEventListener('click', closeEditor);
 $('genBtn').addEventListener('click', () => {
@@ -575,21 +581,18 @@ $('editForm').addEventListener('submit', async e => {
   const site = $('fSite').value.trim(), pass = $('fPass').value, err = $('editErr');
   if (!site) return err.textContent = 'ใส่ชื่อเว็บหรือแอปก่อนบันทึก';
   const cur = editingId && data.items.find(i => i.id === editingId);
+  const newKey = $('fKey').value;
+  if (newKey && newKey !== $('fKey2').value) return err.textContent = 'Key ของรายการทั้งสองช่องไม่ตรงกัน';
+  if (newKey && newKey.length < MIN_ITEM_KEY) return err.textContent = `Key ของรายการต้องยาวอย่างน้อย ${MIN_ITEM_KEY} ตัวอักษร`;
   let pw = cur?.pw ?? null;
-  if (pass !== editOrigPass || !cur){
-    if (!pass) pw = null;
-    else {
-      let key = editPw;
-      if (!key){
-        const btn = e.submitter; if (btn) btn.disabled = true;
-        const keys = await checkKey($('fKey').value);
-        if (btn) btn.disabled = false;
-        if (!keys){ if (!authFailed()) err.textContent = 'Master Key ไม่ถูกต้อง ใช้เข้ารหัสรหัสผ่านนี้ไม่ได้'; return; }
-        authFails = 0; key = keys.pw;
-      }
-      pw = await sealPw(key, pass);
-    }
+  if (!pass) pw = null;
+  else if (newKey){
+    const btn = e.submitter; if (btn){ btn.disabled = true; btn.textContent = 'กำลังเข้ารหัส…'; }
+    pw = await sealItem(newKey, pass);
+    if (btn){ btn.disabled = false; btn.textContent = 'บันทึก'; }
   }
+  else if (editKey){ if (pass !== editOrigPass || !pw) pw = await resealItem(editKey, pass); }
+  else return err.textContent = 'ตั้ง Key ของรายการนี้ก่อน เพื่อใช้ดูรหัสผ่านภายหลัง';
   const fields = {site, user:$('fUser').value.trim(), note:$('fNote').value.trim(), pw, mt:Date.now()};
   if (cur) Object.assign(cur, fields);
   // also covers an item deleted on another device while this editor was open: its newer mt outlives the tombstone
