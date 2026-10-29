@@ -19,7 +19,7 @@ vault.html            เวอร์ชันเดิมแบบไฟล์�
 
 1. **สร้างโปรเจกต์** ที่ <https://console.firebase.google.com> → Add project
 2. **เพิ่ม Web app**: Project settings → Your apps → `</>` (ยังไม่ต้องติ๊ก Hosting ตรงนี้ก็ได้)
-3. **เปิด Authentication**: Build → Authentication → Get started → Sign-in method → **Google** → Enable
+3. **เปิด Authentication**: Build → Authentication → Get started → Sign-in method → **Email/Password** → Enable (ไม่ต้องเปิด Email link) แอปไม่ใช้อีเมลจริง ใช้แค่บัญชีที่สร้างจาก Master Key
    - ถ้าใช้โดเมนของตัวเอง ให้เพิ่มใน Authentication → Settings → **Authorized domains** (`localhost`, `<project>.web.app` และ `<project>.firebaseapp.com` มีให้อยู่แล้ว)
 4. **เปิด Firestore**: Build → Firestore Database → Create database → เลือก region → **Production mode**
 5. **ใส่ config** (เลือกอย่างใดอย่างหนึ่ง)
@@ -33,7 +33,7 @@ vault.html            เวอร์ชันเดิมแบบไฟล์�
    firebase use --add            # เลือกโปรเจกต์ที่สร้างไว้
    firebase deploy --only firestore:rules,hosting
    ```
-7. เปิด `https://<project>.web.app` → เข้าสู่ระบบด้วย Google → ตั้ง Master Key
+7. เปิด `https://<project>.web.app` → ใส่ Master Key → ยืนยันอีกครั้งเพื่อสร้างตู้
 
 ### ทางเลือก: โฮสต์บน GitHub Pages แทน Firebase Hosting
 ยังใช้ Firebase Auth และ Firestore เหมือนเดิม เปลี่ยนแค่ที่วางหน้าเว็บ
@@ -48,6 +48,13 @@ vault.html            เวอร์ชันเดิมแบบไฟล์�
 ทดสอบในเครื่อง: `firebase emulators:start --only hosting` แล้วเปิด `http://localhost:5000` (ใช้ Auth/Firestore ตัวจริงของโปรเจกต์)
 
 ## การทำงาน
+
+### เข้าตู้ด้วย Master Key อย่างเดียว
+ไม่มีอีเมลหรือบัญชี Google แอปแปลง Master Key ด้วย `PBKDF2-SHA256(Key, salt คงที่ของแอป, 600,000)` แล้วใช้ HKDF แยกออกเป็นชื่อบัญชี `<hex>@vault.masterkeypw.app` และรหัสบัญชีสำหรับ Firebase Auth (Email/Password) Firebase จึงได้รับแค่ค่าที่แปลงแล้ว ไม่ได้รับตัว Key ค่านี้แยกสายจากกุญแจตู้ (ซึ่งใช้ salt สุ่มของตู้) จึงใช้เปิดข้อมูลไม่ได้
+- ใส่ Key ที่ยังไม่มีบัญชี แอปจะให้พิมพ์ซ้ำเพื่อยืนยันก่อนสร้างตู้ใหม่ กันพิมพ์ผิดแล้วได้ตู้เปล่า
+- ใครรู้ Master Key ก็เข้าตู้ได้จากทุกที่ ไม่มีด่านอื่นเพิ่ม จึงควรใช้ Key ยาวและไม่ซ้ำกับที่อื่น
+- ตู้จากเวอร์ชันที่ใช้บัญชี Google (หรือ `vault.html` เดิม) จะย้ายเข้าบัญชี Master Key ให้อัตโนมัติเมื่อเข้าด้วย Key เดิมบนเครื่องที่มีสำเนาตู้นั้นอยู่
+- การกู้คืนจากข้อความสำรองจะเข้ารหัสรายการใหม่ด้วย Master Key ของบัญชีปัจจุบันเสมอ
 
 ### สิ่งที่เก็บบนคลาวด์
 `users/{uid}` → `{v, iter, salt, iv, ct, updatedAt}` เท่านั้น ไม่มี plaintext, ไม่มี Key และไม่มี hash ของ Key ส่วน Rules บังคับว่า

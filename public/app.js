@@ -1,11 +1,13 @@
 // UI + Firebase sync. Only sealed blobs {v, iter, salt, iv, ct} ever leave this file; the Master Key and plaintext stay in memory.
+// The Master Key is the only thing the user types: it derives the Firebase login (vault-core loginCreds) and the vault keys.
 // Two layers (see vault-core.js): the meta key opens the list and is remembered per device in IndexedDB (non-extractable);
 // each password needs the Master Key typed again, and the derived password key is dropped right after use.
-import { ITER, b64, unb64, deriveKeys, seal, unseal, sealPw, openPw, openVault, rekey, isBlob, merge, sameData } from './vault-core.js';
+import { ITER, b64, unb64, loginCreds, deriveKeys, seal, unseal, sealPw, openPw, openVault, rekey, isBlob, merge, sameData } from './vault-core.js';
 import { firebaseConfig } from './firebase-config.js';
 
 const FB = 'https://www.gstatic.com/firebasejs/10.14.1/';
 const LEGACY = 'vault.v1', RETRY_MS = 20000, REVEAL_MS = 5000, MAX_AUTH_FAILS = 5;
+const NOT_FOUND = new Set(['auth/invalid-credential', 'auth/invalid-login-credentials', 'auth/user-not-found']);
 const EMPTY = {items:[], tomb:{}};
 const $ = id => document.getElementById(id);
 
@@ -20,6 +22,7 @@ let lastRemote;       // undefined = unknown, null = no doc, else blob
 let pendingRemote = null, keyConflict = null;
 let editingId = null, editPw = null, unwatch = null;   // editPw: password key held only while the editor is open
 let revealed = new Map(), authFails = 0;               // item id → {text, timer}
+let loggingIn = false, pendingCreate = null;           // pendingCreate: {pass, cred} while asking to confirm a new vault
 let auth, db, fb;
 
 // ---------- local cache (offline copy, per Firebase user) ----------
@@ -32,10 +35,17 @@ const cache = {
 function saveLocal(blob){
   if (!cache.set({blob, base, dirty, replace})) toast('เบราว์เซอร์นี้ไม่ให้บันทึกถาวร กรุณาสำรองข้อมูลไว้');
 }
-// vault from the pre-Firebase single-file version
-function takeLegacy(){
-  let v; try { v = JSON.parse(localStorage.getItem(LEGACY)); } catch {}
-  return isBlob(v) ? v : null;
+// a vault left on this device by an older version (pre-Firebase `vault.v1`, or a Google-account cache) that opens with this Key
+async function findLocalVault(pass){
+  let keys = [];
+  try { keys = Object.keys(localStorage).filter(k => k === LEGACY || k.startsWith(LEGACY + ':')); } catch { return null; }
+  for (const k of keys){
+    let v; try { v = JSON.parse(localStorage.getItem(k)); } catch { continue; }
+    const blob = k === LEGACY ? v : v?.blob;
+    if (!isBlob(blob)) continue;
+    try { await openVault(pass, blob); return {key: k, blob}; } catch {}
+  }
+  return null;
 }
 
 // ---------- remembered meta key (IndexedDB keeps CryptoKey objects without exposing their bytes) ----------
@@ -117,7 +127,6 @@ async function syncOnce(){
     base = blob.iv; lastRemote = blob; replace = false;
     if (rev === myRev){ dirty = false; saveLocal(blob); }
     else { saveLocal(await seal(s.meta, s.salt, data)); again = true; }
-    try { localStorage.removeItem(LEGACY); } catch {}
     setStatus(dirty ? 'syncing' : 'synced');
   } catch (e){
     if (session !== s) return;
@@ -170,165 +179,192 @@ function setStatus(st, err){
 
 // ---------- views ----------
 function show(view){
-  for (const v of ['signin','msg','setup','unlock','vault']) $(v + 'View').hidden = view !== v;
-  $('topActions').hidden = $('foot').hidden = view !== 'vault';
-  $('acct').hidden = !user || view === 'signin';
-  if (view === 'setup') $('setKey').focus();
-  if (view === 'unlock') $('unlockKey').focus();
+  for (const v of ['login','msg','setup','vault']) $(v + 'View').hidden = view !== v;
+  $('topActions').hidden = $('foot').hidden = $('acct').hidden = view !== 'vault';
+  if (view === 'setup') $('setKey2').focus();
+  if (view === 'login') $('loginKey').focus();
 }
 function message(title, body, retry){
   $('msgTitle').textContent = title; $('msgBody').textContent = body;
   $('msgActions').hidden = !retry; $('msgRetry').onclick = retry || null;
   show('msg');
 }
-function showLocked(){
-  if (!user) return show('signin');
-  if (cache.get()) return show('unlock');
-  if (lastRemote === null) return show('setup');
-  message('เชื่อมต่อคลาวด์ไม่ได้', 'เครื่องนี้ยังไม่มีสำเนาตู้ และตรวจไม่ได้ว่ามีตู้บนคลาวด์หรือไม่ ตรวจการเชื่อมต่ออินเทอร์เน็ตแล้วลองอีกครั้ง', prepare);
-}
 function clearSession(){
   stopWatch(); clearTimeout(retryTimer);
   for (const r of revealed.values()) clearTimeout(r.timer);
   revealed.clear(); authFails = 0;
   session = null; data = {items:[], tomb:{}}; editingId = null; editPw = null; keyConflict = null; pendingRemote = null;
-  $('list').innerHTML = ''; $('editForm').hidden = true; $('unlockKey').value = ''; $('cfKey').value = ''; $('cfKey2').value = '';
+  $('list').innerHTML = ''; $('editForm').hidden = true; $('cfKey').value = '';
   $('conflictPanel').hidden = true;
+}
+function resetAccount(u){
+  clearSession();
+  user = u; lastRemote = undefined; base = null; dirty = false; replace = false;
+  $('acctId').textContent = u ? (u.email || u.uid).slice(0, 8) : '';
 }
 function useRecord(rec){ base = rec.base ?? null; dirty = !!rec.dirty; replace = !!rec.replace; rev = 0; }
 
-// open straight to the list when this device remembers the meta key for the current vault
-async function enter(){
-  const u = user, rec = u && cache.get();
-  if (rec && (rec.blob.v || 1) >= 3){
-    const dk = await deviceKeys.get(u.uid);
-    if (dk && dk.salt === rec.blob.salt){
-      try {
-        const d = await unseal(dk.meta, rec.blob);
-        if (user !== u) return;
-        session = {meta: dk.meta, salt: unb64(rec.blob.salt)}; data = d; useRecord(rec);
-        return enterVault();
-      } catch {}
-    }
-  }
-  if (user === u) showLocked();
-}
-// make this device forget the vault: next visit needs the Master Key
-async function forget(){
-  const uid = user?.uid;
-  clearSession();
-  if (uid) await deviceKeys.del(uid);
-  showLocked();
-}
-
-// after sign-in: pick the freshest copy (remote unless this device has unsynced changes)
+// fetch the remote copy and keep it as the local cache unless this device has unsynced changes
 async function prepare(){
-  message('กำลังตรวจสอบตู้บนคลาวด์…', 'รอสักครู่');
   const u = user;
   let rec = cache.get();
-  if (!rec){
-    const lg = takeLegacy();
-    if (lg){ rec = {blob: lg, base: null, dirty: true}; cache.set(rec); }
-  }
   try { lastRemote = await fetchRemote(); } catch (e) { console.warn(e); lastRemote = undefined; }
   if (user !== u) return;
   if (lastRemote && (!rec || (!rec.dirty && rec.base !== lastRemote.iv))){
     rec = {blob: lastRemote, base: lastRemote.iv, dirty: false};
     cache.set(rec);
   }
-  enter();
 }
-
-// ---------- auth ----------
-function authError(e){
-  const c = e?.code || '';
-  if (c === 'auth/popup-closed-by-user' || c === 'auth/cancelled-popup-request') return '';
-  if (c === 'auth/unauthorized-domain') return 'โดเมนนี้ยังไม่ได้รับอนุญาต เพิ่มใน Firebase Console → Authentication → Settings → Authorized domains';
-  if (c === 'auth/network-request-failed') return 'เชื่อมต่อเครือข่ายไม่ได้ ลองอีกครั้ง';
-  return 'เข้าสู่ระบบไม่สำเร็จ (' + (c || e?.message || 'ไม่ทราบสาเหตุ') + ')';
+// returning visit: open straight to the list when this device remembers the meta key for the current vault
+async function enterWithDevice(){
+  const u = user, rec = u && cache.get();
+  if (!rec || (rec.blob.v || 1) < 3) return false;
+  const dk = await deviceKeys.get(u.uid);
+  if (!dk || dk.salt !== rec.blob.salt) return false;
+  try {
+    const d = await unseal(dk.meta, rec.blob);
+    if (user !== u) return true;
+    session = {meta: dk.meta, salt: unb64(rec.blob.salt)}; data = d; useRecord(rec);
+    enterVault();
+    return true;
+  } catch { return false; }
 }
-$('signInBtn').addEventListener('click', async () => {
-  const btn = $('signInBtn'); btn.disabled = true; $('signinErr').textContent = '';
-  const provider = new fb.GoogleAuthProvider();
-  provider.setCustomParameters({prompt: 'select_account'});
-  try { await fb.signInWithPopup(auth, provider); }
-  catch (e){
-    if (e?.code === 'auth/popup-blocked' || e?.code === 'auth/operation-not-supported-in-this-environment'){
-      try { return await fb.signInWithRedirect(auth, provider); } catch (e2){ e = e2; }
-    }
-    $('signinErr').textContent = authError(e);
-  }
-  btn.disabled = false;
-});
-$('signOutBtn').addEventListener('click', async () => {
+// sign out and make this device forget the vault: next visit needs the Master Key
+async function forget(){
   const uid = user?.uid;
   clearSession();
   if (uid) await deviceKeys.del(uid);
-  try { await fb.signOut(auth); } catch { toast('ออกจากระบบไม่สำเร็จ'); }
+  try { await fb.signOut(auth); } catch {}
+}
+
+// ---------- login with the Master Key ----------
+function loginError(e){
+  const c = e?.code || '';
+  if (c === 'auth/operation-not-allowed') return 'ยังไม่ได้เปิด Email/Password ใน Firebase Console → Authentication → Sign-in method';
+  if (c === 'auth/too-many-requests') return 'ลองเข้าหลายครั้งเกินไป รอสักครู่แล้วลองใหม่';
+  if (c === 'auth/network-request-failed') return 'เชื่อมต่อเครือข่ายไม่ได้ ลองอีกครั้ง';
+  if (e?.message === 'wrong-vault-key') return 'ตู้ในบัญชีนี้เปิดด้วย Key นี้ไม่ได้';
+  if (e?.message === 'offline') return 'เชื่อมต่อคลาวด์ไม่ได้ ตรวจอินเทอร์เน็ตแล้วลองอีกครั้ง';
+  return 'เข้าตู้ไม่สำเร็จ (' + (c || e?.message || 'ไม่ทราบสาเหตุ') + ')';
+}
+$('loginForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = $('loginBtn'), err = $('loginErr'), pass = $('loginKey').value;
+  if (!pass) return;
+  btn.disabled = true; btn.textContent = 'กำลังเปิดตู้…'; err.textContent = '';
+  loggingIn = true;
+  try {
+    const cred = await loginCreds(pass);
+    let u, seed = null;
+    try { u = (await fb.signInWithEmailAndPassword(auth, cred.email, cred.password)).user; }
+    catch (e2){
+      if (!NOT_FOUND.has(e2?.code)) throw e2;
+      // no account for this Key yet. An older vault on this device that opens with it proves it isn't a typo → move it over.
+      seed = await findLocalVault(pass);
+      if (!seed){ pendingCreate = {pass, cred}; return showCreate(pass); }
+      u = (await fb.createUserWithEmailAndPassword(auth, cred.email, cred.password)).user;
+    }
+    await openAccount(u, pass, seed);
+    if (seed) toast('ย้ายตู้เดิมเข้าบัญชี Master Key แล้ว');
+  } catch (e2){
+    console.warn(e2);
+    err.textContent = loginError(e2);
+    if (fb && auth.currentUser) await forget();
+  } finally {
+    loggingIn = false; $('loginKey').value = '';
+    btn.disabled = false; btn.textContent = 'เข้าตู้';
+  }
 });
 
-// ---------- setup ----------
+// signed in with the Master Key in hand: open (or create) the vault right away
+async function openAccount(u, pass, seed){
+  resetAccount(u);
+  message('กำลังเปิดตู้…', 'รอสักครู่');
+  await prepare();
+  let rec = cache.get();
+  if (!rec && seed){
+    rec = {blob: seed.blob, base: lastRemote?.iv ?? null, dirty: true};
+    if (cache.set(rec)) try { localStorage.removeItem(seed.key); } catch {}
+  }
+  if (!rec){
+    if (lastRemote === null) return createVault(pass);
+    throw new Error('offline');
+  }
+  let r;
+  try { r = await openVault(pass, rec.blob); } catch { throw new Error('wrong-vault-key'); }
+  let {keys, salt, data: d} = r, changed = !!r.upgraded;
+  useRecord(rec);
+  // cloud re-keyed elsewhere (same Master Key, other salt) → move our passwords to its salt and merge, while we still have the pass
+  if (!replace && lastRemote && lastRemote.salt !== rec.blob.salt){
+    try {
+      const r2 = await openVault(pass, lastRemote);
+      d = merge(await rekey(d, keys.pw, r2.keys.pw), r2.data);
+      keys = r2.keys; salt = r2.salt; base = lastRemote.iv; changed = true;
+    } catch {}
+  }
+  session = {meta: keys.meta, salt}; data = d;
+  await rememberDevice();
+  if (changed) await persist();
+  enterVault();
+  if (r.upgraded) toast('ปรับตู้เป็นแบบเข้ารหัส 2 ชั้นแล้ว');
+}
+
+async function createVault(pass){
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  session = {meta: (await deriveKeys(pass, salt)).meta, salt};
+  data = {items:[], tomb:{}}; base = lastRemote?.iv ?? null; replace = false; rev = 0;
+  await rememberDevice();
+  await persist();
+  enterVault();
+}
+
+// ---------- new vault: confirm the Key (a typo would otherwise silently create an empty vault) ----------
 function strength(p){
   let s = 0;
   if (p.length >= 8) s++; if (p.length >= 12) s++; if (p.length >= 16) s++;
   if (/[a-z]/.test(p) && /[A-Z]/.test(p)) s++; if (/\d/.test(p)) s++; if (/[^A-Za-z0-9]/.test(p)) s++;
   return Math.min(s, 5);
 }
-$('setKey').addEventListener('input', e => {
-  const s = strength(e.target.value), bar = $('meterBar');
+function showCreate(pass){
+  const s = strength(pass), bar = $('meterBar');
   bar.style.width = (s/5*100)+'%';
   bar.style.background = s <= 2 ? 'var(--danger)' : s <= 3 ? 'var(--brass)' : 'var(--ok)';
-});
-$('setupBtn').addEventListener('click', async () => {
-  const a = $('setKey').value, b = $('setKey2').value, err = $('setupErr');
-  if (a.length < 8) return err.textContent = 'Key ต้องยาวอย่างน้อย 8 ตัวอักษร';
-  if (a !== b) return err.textContent = 'Key ทั้งสองช่องไม่ตรงกัน ลองพิมพ์ใหม่';
-  err.textContent = ''; $('setupBtn').disabled = true; $('setupBtn').textContent = 'กำลังสร้าง…';
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  session = {meta: (await deriveKeys(a, salt)).meta, salt};
-  data = {items:[], tomb:{}}; base = lastRemote?.iv ?? null; replace = false; rev = 0;
-  await rememberDevice();
-  await persist();
-  $('setKey').value = $('setKey2').value = '';
-  $('setupBtn').disabled = false; $('setupBtn').textContent = 'สร้างตู้นิรภัย';
-  enterVault();
+  $('setKey2').value = '';
+  $('setupErr').textContent = pass.length < 8 ? 'Key นี้สั้นเกินไป ตู้ใหม่ต้องใช้ Key อย่างน้อย 8 ตัวอักษร กดย้อนกลับแล้วตั้งใหม่' : '';
+  $('setupBtn').disabled = pass.length < 8;
+  show('setup');
+}
+$('setupBack').addEventListener('click', () => { pendingCreate = null; show('login'); });
+$('setupView').addEventListener('submit', async e => {
+  e.preventDefault();
+  const pc = pendingCreate, err = $('setupErr'), btn = $('setupBtn');
+  if (!pc) return show('login');
+  if ($('setKey2').value !== pc.pass) return err.textContent = 'Key ไม่ตรงกับที่พิมพ์ครั้งแรก ถ้าครั้งแรกพิมพ์ผิด กดย้อนกลับ';
+  err.textContent = ''; btn.disabled = true; btn.textContent = 'กำลังสร้าง…';
+  loggingIn = true;
+  try {
+    let u;
+    try { u = (await fb.createUserWithEmailAndPassword(auth, pc.cred.email, pc.cred.password)).user; }
+    catch (e2){
+      if (e2?.code !== 'auth/email-already-in-use') throw e2;
+      u = (await fb.signInWithEmailAndPassword(auth, pc.cred.email, pc.cred.password)).user;
+    }
+    pendingCreate = null; $('setKey2').value = '';
+    await openAccount(u, pc.pass, null);
+  } catch (e2){
+    console.warn(e2);
+    err.textContent = loginError(e2);
+    if (auth.currentUser) await forget();
+  } finally {
+    loggingIn = false; btn.disabled = false; btn.textContent = 'สร้างตู้ใหม่';
+  }
 });
 
-// ---------- unlock (once per device) ----------
-$('unlockForm').addEventListener('submit', async e => {
-  e.preventDefault();
-  const btn = $('unlockBtn'), err = $('unlockErr'), rec = cache.get();
-  if (!rec) return showLocked();
-  btn.disabled = true; btn.textContent = 'กำลังถอดรหัส…'; err.textContent = '';
-  const pass = $('unlockKey').value;
-  try {
-    const r = await openVault(pass, rec.blob);
-    let {keys, salt, data: d} = r, changed = !!r.upgraded;
-    useRecord(rec);
-    // cloud re-keyed elsewhere but with the same Master Key → move our passwords to its salt and merge, while we still have the pass
-    if (!replace && lastRemote && lastRemote.salt !== rec.blob.salt){
-      try {
-        const r2 = await openVault(pass, lastRemote);
-        d = merge(await rekey(d, keys.pw, r2.keys.pw), r2.data);
-        keys = r2.keys; salt = r2.salt; base = lastRemote.iv; changed = true;
-      } catch {}
-    }
-    session = {meta: keys.meta, salt}; data = d;
-    $('unlockKey').value = '';
-    await rememberDevice();
-    if (changed) await persist();
-    enterVault();
-    if (r.upgraded) toast('ปรับตู้เป็นแบบเข้ารหัส 2 ชั้นแล้ว');
-  } catch {
-    err.textContent = 'Key ไม่ถูกต้อง ถอดรหัสไม่ได้';
-    $('unlockKey').select();
-  }
-  btn.disabled = false; btn.textContent = 'ปลดล็อก';
-});
+$('signOutBtn').addEventListener('click', forget);
 
 function enterVault(){ show('vault'); render(); startWatch(); sync(); }
 
-// ---------- Master Key check for reveal / edit / delete ----------
+// ---------- Master Key check for reveal / add / edit / delete ----------
 // derive from the typed pass + this vault's salt; correct iff the derived meta key opens something sealed with ours
 async function checkKey(pass){
   const s = session;
@@ -341,42 +377,37 @@ async function checkKey(pass){
 }
 function authFailed(){
   if (++authFails < MAX_AUTH_FAILS) return false;
-  forget(); toast('ใส่ Key ผิดหลายครั้ง เครื่องนี้ลืมตู้แล้ว ต้องใส่ Master Key ใหม่');
+  forget(); toast('ใส่ Key ผิดหลายครั้ง ออกจากตู้แล้ว');
   return true;
 }
 
-// ---------- key conflict ----------
+// ---------- key conflict (cloud sealed under another salt / Key, e.g. by an outdated tab) ----------
 let overwriteArmed = false;
 function showKeyConflict(remote){
   keyConflict = remote; overwriteArmed = false;
   $('cfOverwriteBtn').textContent = 'เขียนทับคลาวด์ด้วยข้อมูลเครื่องนี้'; $('cfErr').textContent = '';
-  $('cfKey2Row').hidden = true;
   $('conflictPanel').hidden = false;
   setStatus('conflict');
 }
-function closeKeyConflict(){ keyConflict = null; $('conflictPanel').hidden = true; $('cfKey').value = $('cfKey2').value = ''; $('cfErr').textContent = ''; }
+function closeKeyConflict(){ keyConflict = null; $('conflictPanel').hidden = true; $('cfKey').value = ''; $('cfErr').textContent = ''; }
 $('cfMergeForm').addEventListener('submit', async e => {
   e.preventDefault();
-  const btn = $('cfMergeBtn'), remote = keyConflict, s = session;
+  const btn = $('cfMergeBtn'), remote = keyConflict, s = session, pass = $('cfKey').value;
   if (!remote) return;
   btn.disabled = true; btn.textContent = 'กำลังถอดรหัส…'; $('cfErr').textContent = '';
   try {
+    const mine = await checkKey(pass);
+    if (!mine) return $('cfErr').textContent = 'Master Key ไม่ถูกต้อง';
     let r;
-    try { r = await openVault($('cfKey').value, remote); }
-    catch { return $('cfErr').textContent = 'Key นี้เปิดข้อมูลบนคลาวด์ไม่ได้'; }
-    // our passwords are sealed under this device's Master Key: usually the same, otherwise ask for it
-    const mine = await checkKey($('cfKey2').value || $('cfKey').value);
-    if (!mine){
-      $('cfKey2Row').hidden = false; $('cfKey2').focus();
-      return $('cfErr').textContent = 'Key ของคลาวด์ต่างจากของเครื่องนี้ ใส่ Master Key ที่ใช้กับเครื่องนี้ด้วย';
-    }
+    try { r = await openVault(pass, remote); }
+    catch { return $('cfErr').textContent = 'ข้อมูลบนคลาวด์ใช้ Key อื่น รวมไม่ได้ ให้รีเฟรชอุปกรณ์ที่เปิดเว็บรุ่นเก่าค้างไว้ หรือเขียนทับคลาวด์'; }
     if (session !== s || keyConflict !== remote) return;
     data = merge(await rekey(data, mine.pw, r.keys.pw), r.data);
     session = {meta: r.keys.meta, salt: r.salt}; base = remote.iv;
     closeKeyConflict(); render();
     await rememberDevice();
     await persist();
-    toast('รวมข้อมูลแล้ว ต่อจากนี้ใช้ Key ของคลาวด์');
+    toast('รวมข้อมูลแล้ว');
   } finally { btn.disabled = false; btn.textContent = 'รวมข้อมูล'; }
 });
 $('cfOverwriteBtn').addEventListener('click', async () => {
@@ -573,18 +604,34 @@ $('exportBtn').addEventListener('click', async () => {
   await copy(JSON.stringify(await seal(session.meta, session.salt, data)));
   toast('คัดลอกข้อความสำรองแล้ว นำไปเก็บไว้ในที่ปลอดภัย');
 });
+// restore = replace the vault with the backup's items, re-encrypted under this account's Master Key (the login depends on it)
 let importArmed = false;
+function resetImport(){ importArmed = false; $('importBtn').textContent = 'กู้คืนจากข้อความนี้'; }
+$('importBox').addEventListener('input', resetImport);
 $('importBtn').addEventListener('click', async () => {
-  const err = $('importErr');
+  const err = $('importErr'), btn = $('importBtn');
   let v; try { v = JSON.parse($('importBox').value); } catch {}
   if (!isBlob(v)) return err.textContent = 'ข้อความนี้ไม่ใช่ข้อความสำรองของตู้นี้';
   if (v.iter !== ITER) return err.textContent = 'ข้อความสำรองนี้ใช้การตั้งค่าเข้ารหัสที่ไม่รองรับ';
-  if (!importArmed){ importArmed = true; $('importBtn').textContent = 'ยืนยัน: แทนที่ข้อมูลปัจจุบัน'; err.textContent = 'ข้อมูลในตู้และบนคลาวด์จะถูกแทนที่'; return; }
-  // pushed (overwriting the cloud) once it is opened with its Master Key
-  cache.set({blob: v, base, dirty: true, replace: true});
-  importArmed = false; $('importBox').value = '';
-  $('importBtn').textContent = 'กู้คืนจากข้อความนี้'; err.textContent = '';
-  await forget(); toast('กู้คืนแล้ว ใส่ Key ของข้อมูลสำรองเพื่อเปิด');
+  if (!importArmed){ importArmed = true; btn.textContent = 'ยืนยัน: แทนที่ข้อมูลปัจจุบัน'; err.textContent = 'รายการในตู้และบนคลาวด์จะถูกแทนที่ด้วยข้อมูลสำรอง'; return; }
+  const s = session, bkKey = $('importKey').value, curKey = $('importCurKey').value || bkKey;
+  btn.disabled = true; err.textContent = 'กำลังถอดรหัส…';
+  try {
+    let r;
+    try { r = await openVault(bkKey, v); } catch { return err.textContent = 'Master Key ของข้อมูลสำรองไม่ถูกต้อง'; }
+    const mine = await checkKey(curKey);
+    if (!mine){
+      $('importCurRow').hidden = false; $('importCurKey').focus();
+      return err.textContent = 'ข้อมูลสำรองใช้ Key ต่างจากตู้นี้ ใส่ Master Key ปัจจุบันด้วย';
+    }
+    if (session !== s) return;
+    data = await rekey(r.data, r.keys.pw, mine.pw);
+    replace = true;
+    for (const id of [...revealed.keys()]) conceal(id);
+    $('importBox').value = $('importKey').value = $('importCurKey').value = ''; $('importCurRow').hidden = true;
+    resetImport(); err.textContent = '';
+    await persist(); render(); toast('กู้คืนแล้ว');
+  } finally { btn.disabled = false; }
 });
 
 window.addEventListener('online', () => sync());
@@ -619,13 +666,16 @@ async function boot(){
   const app = fb.initializeApp(config);
   auth = fb.getAuth(app);
   db = fb.getFirestore(app);
-  fb.getRedirectResult(auth).catch(e => { $('signinErr').textContent = authError(e); });
-  fb.onAuthStateChanged(auth, u => {
-    clearSession();
-    user = u; lastRemote = undefined; dirty = false; replace = false; base = null;
-    $('acctEmail').textContent = u ? (u.email || u.displayName || 'บัญชี Google') : '';
-    if (!u) return show('signin');
-    prepare();
+  fb.onAuthStateChanged(auth, async u => {
+    // the login form drives the rest, with the Master Key in hand
+    if (loggingIn || (u && session && user?.uid === u.uid)) return;
+    resetAccount(u);
+    if (!u) return show('login');
+    // still signed in with Google from the previous version: sign out, keeping its local cache so the Master Key login can move it over
+    if (!u.providerData.some(p => p.providerId === 'password')){ await deviceKeys.del(u.uid); await fb.signOut(auth); return; }
+    message('กำลังเปิดตู้…', 'รอสักครู่');
+    await prepare();
+    if (user === u && !(await enterWithDevice())) await forget();
   });
 }
 boot();

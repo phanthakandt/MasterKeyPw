@@ -34,6 +34,17 @@ export async function deriveKeys(pass, salt){
   return {meta: await sub('vault/meta/v3'), pw: await sub('vault/pw/v3')};
 }
 
+// Firebase Auth credentials derived from the Master Key alone (fixed app salt, since nothing is known before login).
+// Separate HKDF branch from the vault keys, which use the vault's own random salt: knowing these opens nothing.
+const LOGIN_SALT = enc.encode('MasterKeyPw/login/v1');
+export async function loginCreds(pass){
+  const hk = await crypto.subtle.importKey('raw', await pbkdf2Bits(pass, LOGIN_SALT), 'HKDF', false, ['deriveBits']);
+  const sub = async (info, n) => new Uint8Array(await crypto.subtle.deriveBits(
+    {name:'HKDF', hash:'SHA-256', salt:new Uint8Array(32), info:enc.encode(info)}, hk, n));
+  const id = [...await sub('login/id', 128)].map(b => b.toString(16).padStart(2, '0')).join('');
+  return {email: id + '@vault.masterkeypw.app', password: b64(await sub('login/pw', 256))};
+}
+
 export function isBlob(v){
   return !!v && typeof v === 'object' && typeof v.salt === 'string' && typeof v.iv === 'string' && typeof v.ct === 'string';
 }
