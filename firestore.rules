@@ -56,7 +56,8 @@ service cloud.firestore {
           && d.updatedAt == request.time;
       }
 
-      allow read: if signedIn() && (resource.data.owner == me() || me() in resource.data.viewers);
+      // resource == null: เอกสารที่ยังไม่มี (แอปเช็คก่อนสร้างใน transaction) ไม่มีข้อมูลให้อ่าน
+      allow read: if signedIn() && (resource == null || resource.data.owner == me() || me() in resource.data.viewers);
       allow create: if signedIn() && validShared() && request.resource.data.owner == me();
       allow update: if signedIn() && validShared() && request.resource.data.ver != resource.data.ver && (
         // เจ้าของ: แก้อะไรก็ได้ แต่โอนได้เฉพาะให้คนที่เป็นผู้ดูอยู่แล้ว
