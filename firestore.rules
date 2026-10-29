@@ -2,10 +2,22 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // บัญชีที่ถูกแบน: ผู้ดูแลสร้างเอกสาร banned/{uid} ใน Firebase Console (เนื้อหาอะไรก็ได้)
+    // เจ้าของบัญชีอ่านได้อย่างเดียว เพื่อให้แอปขึ้นข้อความว่าถูกระงับ ไม่มีใครเขียนผ่านแอปได้
+    match /banned/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+    }
+
     // หนึ่งผู้ใช้ = หนึ่งเอกสาร เก็บเฉพาะ blob ที่เข้ารหัสแล้ว
     match /users/{uid} {
       function isOwner() {
-        return request.auth != null && request.auth.uid == uid;
+        return request.auth != null && request.auth.uid == uid
+          && !exists(/databases/$(database)/documents/banned/$(request.auth.uid));
+      }
+      // ตู้ใหม่และการเขียนต้องมาจากบัญชี Google เท่านั้น
+      // (บัญชีจากรุ่น Master Key อ่านและลบตู้ตัวเองได้ เพื่อให้แอปย้ายเข้าบัญชี Google)
+      function viaGoogle() {
+        return request.auth.token.firebase.sign_in_provider == 'google.com';
       }
       function validBlob() {
         let d = request.resource.data;
@@ -20,10 +32,10 @@ service cloud.firestore {
       }
 
       allow read: if isOwner();
-      allow create: if isOwner() && validBlob();
+      allow create: if isOwner() && viaGoogle() && validBlob();
       // IV ต้องเปลี่ยนทุกครั้งที่เขียน (กัน IV ซ้ำ)
-      allow update: if isOwner() && validBlob() && request.resource.data.iv != resource.data.iv;
-      // แอปลบเฉพาะตู้ที่ว่างตอนออกจากตู้ (ข้อมูลเข้ารหัสอยู่ เซิร์ฟเวอร์ตรวจไม่ได้ว่าว่างจริง จึงให้สิทธิ์เจ้าของ)
+      allow update: if isOwner() && viaGoogle() && validBlob() && request.resource.data.iv != resource.data.iv;
+      // แอปลบเฉพาะตู้ที่ว่างตอนออกจากตู้ และตู้รุ่นเก่าที่ย้ายมาแล้ว (ข้อมูลเข้ารหัสอยู่ เซิร์ฟเวอร์ตรวจไม่ได้ว่าว่างจริง จึงให้สิทธิ์เจ้าของ)
       allow delete: if isOwner();
     }
 
