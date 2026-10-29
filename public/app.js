@@ -83,18 +83,20 @@ function startShared(){
   stopShared();
   const me = myEmail(); if (!me) return;
   const col = fb.collection(db, 'shared');
-  for (const [field, op] of [['owner', '=='], ['viewers', 'array-contains']]){
-    const mine = new Set();
+  // each query keeps its own results and `shared` is their union: on a transfer a doc moves from one query to the other,
+  // and the snapshots can arrive in either order without one dropping what the other just added
+  const parts = [new Map(), new Map()];
+  [['viewers', 'array-contains'], ['owner', '==']].forEach(([field, op], n) => {
     sharedSubs.push(fb.onSnapshot(fb.query(col, fb.where(field, op, me)), snap => {
       const before = sharedSig();
-      for (const id of mine) shared.delete(id);
-      mine.clear();
-      for (const d of snap.docs){ const s = pickShared(d.id, d.data()); if (s){ shared.set(d.id, s); mine.add(d.id); } }
+      parts[n] = new Map();
+      for (const d of snap.docs){ const s = pickShared(d.id, d.data()); if (s) parts[n].set(d.id, s); }
+      shared = new Map([...parts[0], ...parts[1]]);
       for (const k of [...revealed.keys()]) if (k.startsWith('s:') && !shared.has(k.slice(2))) conceal(k);
       // re-render only on a real change, so a Key being typed into an open card isn't wiped
       if (sharedSig() !== before) render();
     }, e => console.warn(e)));
-  }
+  });
 }
 const sharedSig = () => JSON.stringify([...shared.values()].sort((a, b) => a.id < b.id ? -1 : 1));
 function stopShared(){ sharedSubs.forEach(u => u()); sharedSubs = []; shared.clear(); }
