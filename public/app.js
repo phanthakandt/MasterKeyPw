@@ -335,6 +335,7 @@ function sharePanel(e){
         <form data-shareform novalidate>
           <input type="email" placeholder="อีเมล Gmail ของผู้รับ" aria-label="อีเมลผู้รับ" autocomplete="off" spellcheck="false">
           <button class="primary" type="submit">แชร์</button>
+          <button type="button" data-act="shareclose">ปิด</button>
         </form>
         <span class="muted">ผู้รับดูได้อย่างเดียว ต้องใช้ Key ของรายการนี้ดูรหัสผ่าน ให้บอก Key ทางอื่น (ไม่ใช่อีเมล)</span>
         <span class="err" data-shareerr></span>
@@ -432,6 +433,7 @@ $('list').addEventListener('click', async ev => {
   if (act === 'authno') card.querySelector('[data-auth]').hidden = true;
   if (act === 'share'){ sharingKey = sharingKey === e.key ? null : e.key; transferArmed = null; render(); if (sharingKey) $('list').querySelector('[data-shareform] input')?.focus(); }
   if (act === 'transferno'){ transferArmed = null; render(); }
+  if (act === 'shareclose'){ sharingKey = null; transferArmed = null; render(); }
   if (act === 'unshare' && e.kind === 'owned'){
     try { await unshare(e.doc.id, btn.dataset.email); toast('เอาออกจากการแชร์แล้ว ถ้าเขาเคยดูรหัสไปแล้ว ควรเปลี่ยนรหัสผ่านที่เว็บนั้น'); } catch (x) { shareFail(x); }
   }
