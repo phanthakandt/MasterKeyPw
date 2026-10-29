@@ -18,8 +18,11 @@ let replace = false;  // next push overwrites remote without the version check (
 let rev = 0;          // bumps on every local change, so a push that raced with an edit doesn't clear `dirty`
 let pendingRemote = null;
 let editingId = null, editKey = null, unwatch = null;  // editKey: the item's key, held only while its editor is open
-let revealed = new Map();                              // item id → {text, timer}
+let revealed = new Map();                              // entry key → {text, timer}
+let shared = new Map(), sharedSubs = [];               // shared/{id} docs I own or can view: id → {id, owner, viewers, item}
+let sharingKey = null, transferArmed = null;           // card whose share panel is open; viewer picked for ownership transfer
 let auth, db, fb;
+const myEmail = () => (user?.email || '').toLowerCase();
 
 // ---------- local cache (offline copy, per Google account) ----------
 const mem = {};
@@ -67,6 +70,71 @@ function startWatch(){
   }, e => setStatus('error', e));
 }
 function stopWatch(){ if (unwatch){ unwatch(); unwatch = null; } }
+
+// ---------- shared items: shared/{id} = {owner, viewers: [email], data (JSON of one item), ver, updatedAt} ----------
+// One copy for everyone: the owner edits it, viewers only read (same item Key). The owner can hand ownership to a viewer.
+const sharedRef = id => fb.doc(db, 'shared', id);
+const itemJson = i => JSON.stringify({site: i.site, user: i.user, note: i.note, pw: i.pw, mt: i.mt});
+function pickShared(id, d){
+  const item = parseData({items: [{id, ...(() => { try { return JSON.parse(d.data); } catch { return {}; } })()}]})?.items[0];
+  return item && typeof d.owner === 'string' && Array.isArray(d.viewers) ? {id, owner: d.owner, viewers: d.viewers, item} : null;
+}
+function startShared(){
+  stopShared();
+  const me = myEmail(); if (!me) return;
+  const col = fb.collection(db, 'shared');
+  for (const [field, op] of [['owner', '=='], ['viewers', 'array-contains']]){
+    const mine = new Set();
+    sharedSubs.push(fb.onSnapshot(fb.query(col, fb.where(field, op, me)), snap => {
+      const before = sharedSig();
+      for (const id of mine) shared.delete(id);
+      mine.clear();
+      for (const d of snap.docs){ const s = pickShared(d.id, d.data()); if (s){ shared.set(d.id, s); mine.add(d.id); } }
+      for (const k of [...revealed.keys()]) if (k.startsWith('s:') && !shared.has(k.slice(2))) conceal(k);
+      // re-render only on a real change, so a Key being typed into an open card isn't wiped
+      if (sharedSig() !== before) render();
+    }, e => console.warn(e)));
+  }
+}
+const sharedSig = () => JSON.stringify([...shared.values()].sort((a, b) => a.id < b.id ? -1 : 1));
+function stopShared(){ sharedSubs.forEach(u => u()); sharedSubs = []; shared.clear(); }
+// read-modify-write in a transaction; fn(current doc data or null) returns the new fields
+async function writeShared(id, fn){
+  await fb.runTransaction(db, async tx => {
+    const s = await tx.get(sharedRef(id));
+    const next = fn(s.exists() ? s.data() : null);
+    tx.set(sharedRef(id), {...next, ver: newVer(), updatedAt: fb.serverTimestamp()});
+  });
+}
+const shareFail = e => { console.warn(e); toast(e?.message === 'gone' ? 'รายการนี้ไม่ได้แชร์อยู่แล้ว' : 'แชร์ไม่สำเร็จ ลองอีกครั้ง'); };
+async function shareTo(entry, email){
+  if (entry.kind === 'mine'){
+    const item = entry.item;
+    await writeShared(item.id, cur => { if (cur) throw new Error('exists'); return {owner: myEmail(), viewers: [email], data: itemJson(item)}; });
+    // the personal copy goes away (tombstone, so other devices drop it too): one copy for everyone
+    conceal(item.id);
+    data.items = data.items.filter(i => i.id !== item.id); data.tomb[item.id] = Date.now();
+    persist();
+    sharingKey = 's:' + item.id;
+  } else {
+    await writeShared(entry.doc.id, cur => {
+      if (!cur || cur.owner !== myEmail()) throw new Error('gone');
+      return {owner: cur.owner, viewers: [...new Set([...cur.viewers, email])], data: cur.data};
+    });
+  }
+}
+const unshare = (id, email) => writeShared(id, cur => {
+  if (!cur || cur.owner !== myEmail()) throw new Error('gone');
+  return {owner: cur.owner, viewers: cur.viewers.filter(v => v !== email), data: cur.data};
+});
+const transfer = (id, email) => writeShared(id, cur => {
+  if (!cur || cur.owner !== myEmail() || !cur.viewers.includes(email)) throw new Error('gone');
+  return {owner: email, viewers: [...cur.viewers.filter(v => v !== email), cur.owner], data: cur.data};
+});
+const leaveShared = id => writeShared(id, cur => {
+  if (!cur || !cur.viewers.includes(myEmail())) throw new Error('gone');
+  return {owner: cur.owner, viewers: cur.viewers.filter(v => v !== myEmail()), data: cur.data};
+});
 
 // ---------- sync (single-flight: every remote read/merge/write goes through here) ----------
 let syncing = null, again = false, retryTimer = null;
@@ -163,10 +231,10 @@ function message(title, body, retry){
   show('msg');
 }
 function closeVault(){
-  stopWatch(); clearTimeout(retryTimer);
+  stopWatch(); stopShared(); clearTimeout(retryTimer);
   for (const r of revealed.values()) clearTimeout(r.timer);
   revealed.clear();
-  open = false; data = empty(); editingId = null; editKey = null; pendingRemote = null;
+  open = false; data = empty(); editingId = null; editKey = null; pendingRemote = null; sharingKey = null; transferArmed = null;
   $('list').innerHTML = ''; $('editForm').hidden = true;
 }
 function resetAccount(u){
@@ -188,7 +256,7 @@ async function openAccount(){
   data = parseData(rec.data) ?? empty(); base = rec.base ?? null; dirty = !!rec.dirty; replace = !!rec.replace; rev = 0;
   saveLocal();
   open = true;
-  show('vault'); render(); startWatch(); sync();
+  show('vault'); render(); startWatch(); startShared(); sync();
 }
 
 // Signing out of a vault with no items: remove its doc and the local copy (the Google account stays, so it can still be monitored).
@@ -244,29 +312,59 @@ async function isBanned(uid){
 function showBanned(){ closeVault(); show('banned'); }
 
 // ---------- list ----------
+// entries: my own items, shared items I own (editable, 's:' keys) and items shared with me (read-only)
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function entries(){
+  const out = data.items.map(i => ({key: i.id, kind: 'mine', item: i}));
+  for (const s of shared.values()) out.push({key: 's:' + s.id, kind: s.owner === myEmail() ? 'owned' : 'recv', item: s.item, doc: s});
+  return out;
+}
+const entryOf = key => entries().find(e => e.key === key);
+function sharePanel(e){
+  const viewers = e.kind === 'owned' ? e.doc.viewers : [];
+  return `
+      <div class="share" data-share>
+        ${viewers.length ? viewers.map(v => `
+        <div class="share-row">
+          <span class="who">${esc(v)}</span>
+          ${transferArmed === e.key + '|' + v
+            ? `<button class="danger" data-act="transfer" data-email="${esc(v)}">ยืนยัน: ให้ ${esc(v)} เป็นเจ้าของ</button><button class="ghost" data-act="transferno">ยกเลิก</button>`
+            : `<button class="ghost" data-act="transfer" data-email="${esc(v)}">โอนเป็นเจ้าของ</button><button class="ghost" data-act="unshare" data-email="${esc(v)}">เอาออก</button>`}
+        </div>`).join('') : '<span class="muted">ยังไม่ได้แชร์ให้ใคร</span>'}
+        ${transferArmed?.startsWith(e.key + '|') ? '<span class="muted">โอนแล้วคุณจะกลายเป็นผู้ดู แก้ไข ลบ หรือแชร์ต่อไม่ได้ และเอาคืนเองไม่ได้</span>' : ''}
+        <form data-shareform novalidate>
+          <input type="email" placeholder="อีเมล Gmail ของผู้รับ" aria-label="อีเมลผู้รับ" autocomplete="off" spellcheck="false">
+          <button class="primary" type="submit">แชร์</button>
+        </form>
+        <span class="muted">ผู้รับดูได้อย่างเดียว ต้องใช้ Key ของรายการนี้ดูรหัสผ่าน ให้บอก Key ทางอื่น (ไม่ใช่อีเมล)</span>
+        <span class="err" data-shareerr></span>
+      </div>`;
+}
 function render(){
-  const items = data.items;
+  const all = entries();
   const q = $('search').value.trim().toLowerCase();
-  const list = items.filter(i => !q || i.site.toLowerCase().includes(q) || (i.user||'').toLowerCase().includes(q))
-                    .sort((a,b) => a.site.localeCompare(b.site, 'th'));
-  $('countLabel').textContent = items.length + ' รายการ';
-  if (!items.length){
+  const list = all.filter(({item: i}) => !q || i.site.toLowerCase().includes(q) || (i.user||'').toLowerCase().includes(q))
+                  .sort((a,b) => a.item.site.localeCompare(b.item.site, 'th'));
+  $('countLabel').textContent = all.length + ' รายการ';
+  if (!all.length){
     $('list').innerHTML = '<div class="empty">ตู้ยังว่างอยู่<br>กด <strong>+ เพิ่มรายการ</strong> เพื่อฝาก username และรหัสผ่านแรก</div>';
     return;
   }
   if (!list.length){ $('list').innerHTML = '<div class="empty">ไม่พบรายการที่ตรงกับคำค้น</div>'; return; }
-  $('list').innerHTML = list.map(i => {
-    const shown = revealed.get(i.id), none = !i.pw;
+  $('list').innerHTML = list.map(e => {
+    const i = e.item, shown = revealed.get(e.key), none = !i.pw;
+    const actions = e.kind === 'recv'
+      ? '<button class="ghost" data-act="leave">ออกจากการแชร์</button>'
+      : `<button class="ghost" data-act="edit">แก้ไข</button><button class="ghost" data-act="share">แชร์</button><button class="ghost" data-act="del">ลบ</button>`;
+    const badge = e.kind === 'recv' ? `<span class="badge recv">แชร์จาก ${esc(e.doc.owner)} · ดูได้อย่างเดียว</span>`
+      : e.kind === 'owned' ? `<span class="badge">แชร์ให้ ${e.doc.viewers.length} คน</span>` : '';
     return `
-    <article class="item" data-id="${esc(i.id)}">
+    <article class="item" data-id="${esc(e.key)}">
       <div class="item-head">
         <span class="item-title">${esc(i.site)}</span>
-        <span class="row" style="gap:2px;flex-wrap:nowrap">
-          <button class="ghost" data-act="edit">แก้ไข</button>
-          <button class="ghost" data-act="del">ลบ</button>
-        </span>
+        <span class="row" style="gap:2px;flex-wrap:nowrap">${actions}</span>
       </div>
+      ${badge}
       <div class="fields">
         <button class="chip" data-act="copy" data-f="user" title="คลิกเพื่อคัดลอก username">
           <span class="k">User</span><span class="v">${esc(i.user) || '<span class="muted">—</span>'}</span><span class="c">คัดลอก</span>
@@ -278,6 +376,7 @@ function render(){
         </div>
       </div>
       ${i.note ? `<div class="item-note">${esc(i.note)}</div>` : ''}
+      ${sharingKey === e.key && e.kind !== 'recv' ? sharePanel(e) : ''}
       <form class="confirm auth" data-auth hidden>
         <span data-authlabel style="flex-basis:100%"></span>
         <span class="keyfield"><input type="password" autocomplete="off" placeholder="Key ของรายการนี้" aria-label="Key" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
@@ -289,70 +388,108 @@ function render(){
 }
 $('search').addEventListener('input', render);
 
-// reveal / edit ask for the item's Key; delete only asks to confirm (no Key needed, so a forgotten Key can't trap an item)
+// reveal / edit ask for the item's Key; delete and leaving a share only ask to confirm (a forgotten Key can't trap an item)
 const AUTH_LABEL = {
   reveal: () => 'ใส่ Key ของรายการนี้เพื่อดูรหัสผ่าน',
   edit: () => 'ใส่ Key ของรายการนี้เพื่อแก้ไข',
-  del: item => `ลบ “${item.site}” ถาวร?`,
+  del: e => e.kind === 'owned' ? `ลบ “${e.item.site}” ถาวร? รายการจะหายจากทุกคนที่แชร์ด้วย` : `ลบ “${e.item.site}” ถาวร?`,
+  leave: e => `เลิกดู “${e.item.site}” ที่ ${e.doc.owner} แชร์ให้? จะกลับมาเห็นได้เมื่อเจ้าของแชร์ให้ใหม่`,
 };
-function askKey(card, item, then){
-  const f = card.querySelector('[data-auth]'), needKey = then !== 'del';
+function askKey(card, e, then){
+  const f = card.querySelector('[data-auth]'), needKey = then === 'reveal' || then === 'edit';
   f.dataset.then = then; f.hidden = false;
-  f.querySelector('[data-authlabel]').textContent = AUTH_LABEL[then](item);
+  f.querySelector('[data-authlabel]').textContent = AUTH_LABEL[then](e);
   f.querySelector('.keyfield').hidden = !needKey;
   f.querySelector('[type=submit]').className = needKey ? 'primary' : 'danger';
-  f.querySelector('[type=submit]').textContent = needKey ? 'ยืนยัน' : 'ลบเลย';
+  f.querySelector('[type=submit]').textContent = needKey ? 'ยืนยัน' : then === 'leave' ? 'ออกจากการแชร์' : 'ลบเลย';
   f.querySelector('[data-autherr]').textContent = '';
   (needKey ? f.querySelector('input') : f.querySelector('[type=submit]')).focus();
 }
-function reveal(id, text){
-  conceal(id);
-  revealed.set(id, {text, timer: setTimeout(() => { revealed.delete(id); render(); }, REVEAL_MS)});
+function reveal(key, text){
+  conceal(key);
+  revealed.set(key, {text, timer: setTimeout(() => { revealed.delete(key); render(); }, REVEAL_MS)});
 }
-function conceal(id){ clearTimeout(revealed.get(id)?.timer); revealed.delete(id); }
+function conceal(key){ clearTimeout(revealed.get(key)?.timer); revealed.delete(key); }
 
-$('list').addEventListener('click', async e => {
-  const btn = e.target.closest('[data-act]'); if (!btn) return;
-  const card = btn.closest('.item'), item = data.items.find(i => i.id === card.dataset.id);
-  if (!item) return render();
-  const act = btn.dataset.act;
+$('list').addEventListener('click', async ev => {
+  const btn = ev.target.closest('[data-act]'); if (!btn) return;
+  const card = btn.closest('.item'), e = entryOf(card.dataset.id);
+  if (!e) return render();
+  const act = btn.dataset.act, item = e.item;
   if (act === 'copy'){
     const isPass = btn.dataset.f === 'pass';
-    if (isPass && item.pw && !revealed.has(item.id)) return askKey(card, item, 'reveal');
-    const val = isPass ? revealed.get(item.id)?.text : item.user;
+    if (isPass && item.pw && !revealed.has(e.key)) return askKey(card, e, 'reveal');
+    const val = isPass ? revealed.get(e.key)?.text : item.user;
     if (!val) return toast('ช่องนี้ว่างอยู่');
     await copy(val);
     btn.classList.add('copied'); btn.querySelector('.c').textContent = 'คัดลอกแล้ว';
     setTimeout(() => { btn.classList.remove('copied'); btn.querySelector('.c').textContent = 'คัดลอก'; }, 1500);
     toast(isPass ? 'คัดลอกรหัสผ่านแล้ว' : 'คัดลอก username แล้ว');
   }
-  if (act === 'edit') item.pw ? askKey(card, item, 'edit') : openEditor(item);
-  if (act === 'del') askKey(card, item, 'del');
+  if (act === 'edit') item.pw ? askKey(card, e, 'edit') : openEditor(e);
+  if (act === 'del') askKey(card, e, 'del');
+  if (act === 'leave') askKey(card, e, 'leave');
   if (act === 'authno') card.querySelector('[data-auth]').hidden = true;
+  if (act === 'share'){ sharingKey = sharingKey === e.key ? null : e.key; transferArmed = null; render(); if (sharingKey) $('list').querySelector('[data-shareform] input')?.focus(); }
+  if (act === 'transferno'){ transferArmed = null; render(); }
+  if (act === 'unshare' && e.kind === 'owned'){
+    try { await unshare(e.doc.id, btn.dataset.email); toast('เอาออกจากการแชร์แล้ว ถ้าเขาเคยดูรหัสไปแล้ว ควรเปลี่ยนรหัสผ่านที่เว็บนั้น'); } catch (x) { shareFail(x); }
+  }
+  if (act === 'transfer' && e.kind === 'owned'){
+    const email = btn.dataset.email, armKey = e.key + '|' + email;
+    if (transferArmed !== armKey){ transferArmed = armKey; return render(); }
+    transferArmed = null;
+    try { await transfer(e.doc.id, email); sharingKey = null; toast('โอนความเป็นเจ้าของให้ ' + email + ' แล้ว'); } catch (x) { shareFail(x); }
+  }
 });
 
-$('list').addEventListener('submit', async e => {
-  const f = e.target.closest('[data-auth]'); if (!f) return;
-  e.preventDefault();
-  const id = f.closest('.item').dataset.id, input = f.querySelector('input'), btn = f.querySelector('[type=submit]');
-  const then = f.dataset.then, u = user;
-  const item = data.items.find(i => i.id === id); if (!item) return render();
-  if (then === 'del'){
-    conceal(id);
-    data.items = data.items.filter(i => i.id !== id);
-    data.tomb[id] = Date.now();
-    persist(); render(); toast('ลบแล้ว');
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+$('list').addEventListener('submit', async ev => {
+  const sf = ev.target.closest('[data-shareform]');
+  if (sf){
+    ev.preventDefault();
+    const card = sf.closest('.item'), e = entryOf(card.dataset.id), err = card.querySelector('[data-shareerr]');
+    const input = sf.querySelector('input'), btn = sf.querySelector('[type=submit]'), email = input.value.trim().toLowerCase();
+    if (!e || e.kind === 'recv') return render();
+    if (!EMAIL.test(email)) return err.textContent = 'ใส่อีเมลให้ถูกต้อง';
+    if (email === myEmail()) return err.textContent = 'แชร์ให้ตัวเองไม่ได้';
+    if (e.kind === 'owned' && e.doc.viewers.includes(email)) return err.textContent = 'แชร์ให้อีเมลนี้อยู่แล้ว';
+    btn.disabled = true; err.textContent = '';
+    try { await shareTo(e, email); input.value = ''; toast('แชร์ให้ ' + email + ' แล้ว อย่าลืมบอก Key ของรายการให้เขาทางอื่น'); }
+    catch (x) { shareFail(x); }
+    finally { btn.disabled = false; }
+    return;
+  }
+  const f = ev.target.closest('[data-auth]'); if (!f) return;
+  ev.preventDefault();
+  const key = f.closest('.item').dataset.id, input = f.querySelector('input'), btn = f.querySelector('[type=submit]');
+  const then = f.dataset.then, u = user, e = entryOf(key);
+  if (!e) return render();
+  if (then === 'del' || then === 'leave'){
+    conceal(key);
+    if (e.kind === 'mine'){
+      data.items = data.items.filter(i => i.id !== e.item.id);
+      data.tomb[e.item.id] = Date.now();
+      persist(); render(); toast('ลบแล้ว');
+    } else {
+      btn.disabled = true;
+      try {
+        if (then === 'del'){ await fb.deleteDoc(sharedRef(e.doc.id)); toast('ลบแล้ว'); }
+        else { await leaveShared(e.doc.id); toast('ออกจากการแชร์แล้ว'); }
+      } catch (x) { shareFail(x); }
+      btn.disabled = false;
+    }
     return;
   }
   const label = btn.textContent, pass = input.value;
   btn.disabled = true; btn.textContent = 'กำลังตรวจ…';
   let opened = null;
-  if (pass) try { opened = await openItem(pass, item.pw); } catch {}
+  if (pass) try { opened = await openItem(pass, e.item.pw); } catch {}
   input.value = ''; btn.disabled = false; btn.textContent = label;
   if (user !== u || !open) return;
   if (!opened){ f.querySelector('[data-autherr]').textContent = 'Key ไม่ถูกต้อง'; return input.focus(); }
-  if (then === 'reveal'){ reveal(id, opened.text); render(); }
-  if (then === 'edit'){ f.hidden = true; openEditor(item, opened.text, opened.k); }
+  if (then === 'reveal'){ reveal(key, opened.text); render(); }
+  if (then === 'edit'){ f.hidden = true; openEditor(e, opened.text, opened.k); }
 });
 
 async function copy(text){
@@ -367,8 +504,10 @@ async function copy(text){
 // ---------- editor ----------
 // editing arrives already unlocked (k = the item's key); a new Key can be set here, otherwise the current one is kept
 let editOrigPass = '';
-function openEditor(item, pass = '', k = null){
-  editingId = item ? item.id : null; editKey = k; editOrigPass = pass;
+// e = the entry being edited (mine or a shared item I own), null for a new item
+function openEditor(e, pass = '', k = null){
+  const item = e?.item;
+  editingId = e ? e.key : null; editKey = k; editOrigPass = pass;
   $('editTitle').textContent = item ? 'แก้ไขรายการ' : 'เพิ่มรายการ';
   $('fSite').value = item?.site || ''; $('fUser').value = item?.user || '';
   $('fPass').value = pass; $('fNote').value = item?.note || ''; $('fKey').value = $('fKey2').value = '';
@@ -391,7 +530,8 @@ $('editForm').addEventListener('submit', async e => {
   e.preventDefault();
   const site = $('fSite').value.trim(), pass = $('fPass').value, err = $('editErr');
   if (!site) return err.textContent = 'ใส่ชื่อเว็บหรือแอปก่อนบันทึก';
-  const cur = editingId && data.items.find(i => i.id === editingId);
+  const entry = editingId && entryOf(editingId), cur = entry?.item;
+  if (editingId?.startsWith('s:') && !entry) return err.textContent = 'รายการนี้ถูกลบหรือโอนไปแล้ว';
   const newKey = $('fKey').value;
   if (newKey && newKey !== $('fKey2').value) return err.textContent = 'Key ของรายการทั้งสองช่องไม่ตรงกัน';
   if (newKey && newKey.length < MIN_ITEM_KEY) return err.textContent = `Key ของรายการต้องยาวอย่างน้อย ${MIN_ITEM_KEY} ตัวอักษร`;
@@ -405,6 +545,17 @@ $('editForm').addEventListener('submit', async e => {
   else if (editKey){ if (pass !== editOrigPass || !pw) pw = await resealItem(editKey, pass); }
   else return err.textContent = 'ตั้ง Key ของรายการนี้ก่อน เพื่อใช้ดูรหัสผ่านภายหลัง';
   const fields = {site, user:$('fUser').value.trim(), note:$('fNote').value.trim(), pw, mt:Date.now()};
+  if (entry && entry.kind !== 'mine'){
+    // a shared item: written straight to its shared doc, everyone sees the change
+    try {
+      await writeShared(entry.doc.id, d => {
+        if (!d || d.owner !== myEmail()) throw new Error('gone');
+        return {owner: d.owner, viewers: d.viewers, data: itemJson(fields)};
+      });
+    } catch (x) { return shareFail(x); }
+    conceal(editingId); closeEditor(); render(); toast('บันทึกแล้ว ทุกคนที่แชร์ด้วยเห็นการเปลี่ยนแปลง');
+    return;
+  }
   if (cur) Object.assign(cur, fields);
   // also covers an item deleted on another device while this editor was open: its newer mt outlives the tombstone
   else data.items.push({id: editingId || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random())), ...fields});

@@ -33,6 +33,43 @@ service cloud.firestore {
       allow update: if isOwner() && validDoc() && request.resource.data.ver != resource.data.ver;
     }
 
+    // รายการที่แชร์: เอกสารเดียวที่ทุกคนเห็นตรงกัน (ไม่มีสำเนา)
+    // owner = อีเมลเจ้าของ (แก้ไข แชร์ ลบ โอนได้), viewers = อีเมลผู้ดู (อ่านได้อย่างเดียว หรือออกจากการแชร์เอง)
+    match /shared/{id} {
+      function me() {
+        return request.auth.token.email.lower();
+      }
+      function signedIn() {
+        return request.auth != null
+          && request.auth.token.firebase.sign_in_provider == 'google.com'
+          && request.auth.token.email_verified == true
+          && !exists(/databases/$(database)/documents/banned/$(request.auth.uid));
+      }
+      function validShared() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['owner', 'viewers', 'data', 'ver', 'updatedAt'])
+          && d.keys().hasAll(['owner', 'viewers', 'data', 'ver', 'updatedAt'])
+          && d.owner is string && d.owner.size() > 3
+          && d.viewers is list && d.viewers.size() <= 50 && !(d.owner in d.viewers)
+          && d.data is string && d.data.size() < 100000
+          && d.ver is string && d.ver.size() == 16
+          && d.updatedAt == request.time;
+      }
+
+      allow read: if signedIn() && (resource.data.owner == me() || me() in resource.data.viewers);
+      allow create: if signedIn() && validShared() && request.resource.data.owner == me();
+      allow update: if signedIn() && validShared() && request.resource.data.ver != resource.data.ver && (
+        // เจ้าของ: แก้อะไรก็ได้ แต่โอนได้เฉพาะให้คนที่เป็นผู้ดูอยู่แล้ว
+        (resource.data.owner == me()
+          && (request.resource.data.owner == me() || request.resource.data.owner in resource.data.viewers))
+        // ผู้ดู: เอาชื่อตัวเองออกได้อย่างเดียว
+        || (me() in resource.data.viewers
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewers', 'ver', 'updatedAt'])
+          && request.resource.data.viewers.toSet() == resource.data.viewers.toSet().difference([me()].toSet()))
+      );
+      allow delete: if signedIn() && resource.data.owner == me();
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

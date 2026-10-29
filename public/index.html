@@ -80,6 +80,15 @@ button:disabled{opacity:.6;cursor:default}
 .chip.copied .c{color:var(--ok)}
 .pw-row{display:flex;gap:6px;min-width:0}
 .pw-row .chip{flex:1}
+.badge{align-self:flex-start;font-size:.75rem;padding:2px 9px;border-radius:999px;border:1px solid var(--line);color:var(--muted);overflow-wrap:anywhere}
+.badge.recv{border-color:var(--brass);color:var(--brass)}
+.share{display:flex;flex-direction:column;gap:8px;border-top:1px dashed var(--line);padding-top:10px;font-size:.88rem}
+.share-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.share-row .who{flex:1 1 160px;min-width:0;overflow-wrap:anywhere;font-family:var(--mono);font-size:.82rem}
+.share form{display:flex;gap:6px;flex-wrap:wrap}
+.share form input{flex:1 1 200px}
+.share .err{min-height:0}
+.share .err:empty{display:none}
 .empty{text-align:center;padding:36px 16px;border:1px dashed var(--line);border-radius:10px;color:var(--muted)}
 .confirm{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:.88rem}
 .auth .keyfield{flex:1 1 180px}
