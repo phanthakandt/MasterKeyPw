@@ -3,7 +3,7 @@ import { ITER, b64, deriveKey, seal, unseal, openBlob, isBlob, merge, sameData }
 import { firebaseConfig } from './firebase-config.js';
 
 const FB = 'https://www.gstatic.com/firebasejs/10.14.1/';
-const LEGACY = 'vault.v1', IDLE_MS = 5 * 60 * 1000, RETRY_MS = 20000, REVEAL_MS = 30000, MAX_AUTH_FAILS = 5;
+const LEGACY = 'vault.v1', IDLE_MS = 5 * 60 * 1000, RETRY_MS = 20000, REVEAL_MS = 5000, MAX_AUTH_FAILS = 5;
 const $ = id => document.getElementById(id);
 
 // ---------- state ----------
