@@ -454,7 +454,6 @@ function render(){
           <button class="chip" data-act="copy" data-f="pass" title="${shown ? 'คลิกเพื่อคัดลอกรหัสผ่าน' : 'ใส่ Key ของรายการนี้เพื่อดูและคัดลอกรหัสผ่าน'}">
             <span class="k">Pass</span><span class="v">${none ? '<span class="muted">—</span>' : shown ? esc(shown.text) : '••••••••••'}</span><span class="c">${none ? '' : shown ? 'คัดลอก' : 'ดูรหัส'}</span>
           </button>
-          ${none ? '' : `<button class="ghost" data-act="peek" aria-label="${shown ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}">${shown ? 'ซ่อน' : 'ดู'}</button>`}
         </div>
       </div>
       ${i.note ? `<div class="item-note">${esc(i.note)}</div>` : ''}
@@ -506,10 +505,6 @@ $('list').addEventListener('click', async e => {
     btn.classList.add('copied'); btn.querySelector('.c').textContent = 'คัดลอกแล้ว';
     setTimeout(() => { btn.classList.remove('copied'); btn.querySelector('.c').textContent = 'คัดลอก'; }, 1500);
     toast(isPass ? 'คัดลอกรหัสผ่านแล้ว' : 'คัดลอก username แล้ว');
-  }
-  if (act === 'peek'){
-    if (revealed.has(item.id)){ conceal(item.id); render(); }
-    else askKey(card, item, 'reveal');
   }
   if (act === 'edit') askKey(card, item, 'edit');
   if (act === 'del') askKey(card, item, 'del');
