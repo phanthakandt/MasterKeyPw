@@ -3,7 +3,7 @@ import { ITER, b64, deriveKey, seal, unseal, openBlob, isBlob, merge, sameData }
 import { firebaseConfig } from './firebase-config.js';
 
 const FB = 'https://www.gstatic.com/firebasejs/10.14.1/';
-const LEGACY = 'vault.v1', IDLE_MS = 5 * 60 * 1000, RETRY_MS = 20000;
+const LEGACY = 'vault.v1', IDLE_MS = 5 * 60 * 1000, RETRY_MS = 20000, REVEAL_MS = 30000, MAX_AUTH_FAILS = 5;
 const $ = id => document.getElementById(id);
 
 // ---------- state ----------
@@ -16,6 +16,7 @@ let rev = 0;          // bumps on every local change, so a push that raced with 
 let lastRemote;       // undefined = unknown, null = no doc, else blob
 let pendingRemote = null, keyConflict = null;
 let editingId = null, idleTimer = null, unwatch = null;
+let revealed = new Map(), authFails = 0;   // item id → auto-hide timer, for passwords unlocked by re-entering the Master Key
 let auth, db, fb;
 
 // ---------- local cache (offline copy, per Firebase user) ----------
@@ -166,6 +167,8 @@ function showLocked(){
 function clearSession(){
   stopWatch(); clearTimeout(idleTimer); clearTimeout(retryTimer);
   session = null; data = {items:[], tomb:{}}; editingId = null; keyConflict = null; pendingRemote = null;
+  for (const t of revealed.values()) clearTimeout(t);
+  revealed.clear(); authFails = 0;
   $('list').innerHTML = ''; $('editForm').hidden = true; $('unlockKey').value = ''; $('cfKey').value = '';
   $('conflictPanel').hidden = true;
 }
@@ -322,7 +325,7 @@ function render(){
     return;
   }
   if (!list.length){ $('list').innerHTML = '<div class="empty">ไม่พบรายการที่ตรงกับคำค้น</div>'; return; }
-  $('list').innerHTML = list.map(i => `
+  $('list').innerHTML = list.map(i => { const shown = revealed.has(i.id); return `
     <article class="item" data-id="${esc(i.id)}">
       <div class="item-head">
         <span class="item-title">${esc(i.site)}</span>
@@ -336,19 +339,25 @@ function render(){
           <span class="k">User</span><span class="v">${esc(i.user) || '<span class="muted">—</span>'}</span><span class="c">คัดลอก</span>
         </button>
         <div class="pw-row">
-          <button class="chip" data-act="copy" data-f="pass" title="คลิกเพื่อคัดลอกรหัสผ่าน">
-            <span class="k">Pass</span><span class="v" data-pw>••••••••••</span><span class="c">คัดลอก</span>
+          <button class="chip" data-act="copy" data-f="pass" title="${shown ? 'คลิกเพื่อคัดลอกรหัสผ่าน' : 'ใส่ Master Key เพื่อดูและคัดลอกรหัสผ่าน'}">
+            <span class="k">Pass</span><span class="v">${shown ? (esc(i.pass) || '<span class="muted">—</span>') : '••••••••••'}</span><span class="c">${shown ? 'คัดลอก' : 'ดูรหัส'}</span>
           </button>
-          <button class="ghost" data-act="peek" aria-label="แสดงรหัสผ่าน">ดู</button>
+          <button class="ghost" data-act="peek" aria-label="${shown ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}">${shown ? 'ซ่อน' : 'ดู'}</button>
         </div>
       </div>
       ${i.note ? `<div class="item-note">${esc(i.note)}</div>` : ''}
+      <form class="confirm auth" data-auth hidden>
+        <input type="password" autocomplete="off" placeholder="ใส่ Master Key เพื่อยืนยัน" aria-label="Master Key">
+        <button class="primary" type="submit">ยืนยัน</button>
+        <button type="button" data-act="authno">ยกเลิก</button>
+        <span class="err" data-autherr></span>
+      </form>
       <div class="confirm" data-confirm hidden>
         <span>ลบ “${esc(i.site)}” ถาวร?</span>
         <button class="danger" data-act="delyes">ลบเลย</button>
         <button data-act="delno">ไม่ลบ</button>
       </div>
-    </article>`).join('');
+    </article>`; }).join('');
 }
 $('search').addEventListener('input', render);
 
@@ -358,6 +367,7 @@ $('list').addEventListener('click', async e => {
   if (!item) return render();
   const act = btn.dataset.act;
   if (act === 'copy'){
+    if (btn.dataset.f === 'pass' && !revealed.has(item.id)) return askKey(card, 'reveal');
     const val = btn.dataset.f === 'user' ? item.user : item.pass;
     if (!val) return toast('ช่องนี้ว่างอยู่');
     await copy(val);
@@ -366,11 +376,12 @@ $('list').addEventListener('click', async e => {
     toast(btn.dataset.f === 'user' ? 'คัดลอก username แล้ว' : 'คัดลอกรหัสผ่านแล้ว');
   }
   if (act === 'peek'){
-    const v = card.querySelector('[data-pw]'), shown = btn.textContent === 'ซ่อน';
-    v.textContent = shown ? '••••••••••' : (item.pass || '—');
-    btn.textContent = shown ? 'ดู' : 'ซ่อน';
+    if (revealed.has(item.id)){ conceal(item.id); render(); }
+    else askKey(card, 'reveal');
   }
-  if (act === 'edit') openEditor(item);
+  // the editor shows the password in clear, so it sits behind the same check
+  if (act === 'edit') revealed.has(item.id) ? openEditor(item) : askKey(card, 'edit');
+  if (act === 'authno') card.querySelector('[data-auth]').hidden = true;
   if (act === 'del') card.querySelector('[data-confirm]').hidden = false;
   if (act === 'delno') card.querySelector('[data-confirm]').hidden = true;
   if (act === 'delyes'){
@@ -378,6 +389,50 @@ $('list').addEventListener('click', async e => {
     data.tomb[item.id] = Date.now();
     await persist(); render(); toast('ลบแล้ว');
   }
+});
+
+// ---------- re-enter Master Key to reveal / edit a password ----------
+function askKey(card, then){
+  const f = card.querySelector('[data-auth]');
+  f.dataset.then = then; f.hidden = false;
+  f.querySelector('[data-autherr]').textContent = '';
+  f.querySelector('input').focus();
+}
+// derive from the typed pass + this vault's salt and check it opens something sealed with the session key
+async function verifyKey(pass){
+  const s = session;
+  if (!pass || !s) return false;
+  try {
+    const key = await deriveKey(pass, s.salt);
+    await unseal(key, await seal(s.key, s.salt, {items:[], tomb:{}}));
+    return true;
+  } catch { return false; }
+}
+function reveal(id){
+  clearTimeout(revealed.get(id));
+  revealed.set(id, setTimeout(() => { revealed.delete(id); render(); }, REVEAL_MS));
+}
+function conceal(id){ clearTimeout(revealed.get(id)); revealed.delete(id); }
+
+$('list').addEventListener('submit', async e => {
+  const f = e.target.closest('[data-auth]'); if (!f) return;
+  e.preventDefault();
+  const id = f.closest('.item').dataset.id, input = f.querySelector('input'), btn = f.querySelector('[type=submit]');
+  const s = session;
+  btn.disabled = true; btn.textContent = 'กำลังตรวจ…';
+  const ok = await verifyKey(input.value);
+  input.value = '';
+  if (session !== s) return;
+  btn.disabled = false; btn.textContent = 'ยืนยัน';
+  if (!ok){
+    if (++authFails >= MAX_AUTH_FAILS){ lock(); return toast('ใส่ Key ผิดหลายครั้ง ล็อกตู้แล้ว'); }
+    f.querySelector('[data-autherr]').textContent = 'Key ไม่ถูกต้อง';
+    return input.focus();
+  }
+  authFails = 0;
+  reveal(id); render();
+  const item = data.items.find(i => i.id === id);
+  if (f.dataset.then === 'edit' && item) openEditor(item);
 });
 
 async function copy(text){
