@@ -82,7 +82,6 @@ button:disabled{opacity:.6;cursor:default}
 .pw-row .chip{flex:1}
 .empty{text-align:center;padding:36px 16px;border:1px dashed var(--line);border-radius:10px;color:var(--muted)}
 .confirm{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:.88rem}
-.conflict{border-color:var(--danger)}
 .auth .keyfield{flex:1 1 180px}
 .keyfield{display:flex;gap:4px;align-items:center;min-width:0}
 .keyfield input{flex:1;min-width:0}
@@ -118,7 +117,7 @@ details summary{cursor:pointer;font-weight:500}
   <!-- เข้าสู่ระบบด้วย Google -->
   <section class="panel" id="signinView" hidden>
     <h2>เข้าสู่ระบบเพื่อซิงก์</h2>
-    <p class="muted">บัญชี Google ใช้เพื่อดึงตู้ที่เข้ารหัสแล้วของคุณจากคลาวด์เท่านั้น Master Key เป็นคนละส่วนกันและไม่ถูกส่งออกจากเบราว์เซอร์นี้ คลาวด์ไม่สามารถเปิดดูรายการของคุณได้</p>
+    <p class="muted">เข้าด้วยบัญชี Google แล้วรายการจะซิงก์ทุกอุปกรณ์ที่เข้าด้วยบัญชีเดียวกัน รหัสผ่านแต่ละรายการเข้ารหัสในเบราว์เซอร์ด้วย Key ของรายการนั้น ตัว Key และรหัสผ่านจริงไม่ถูกส่งออกจากเบราว์เซอร์</p>
     <div class="row"><button class="primary" id="signInBtn">เข้าสู่ระบบด้วย Google</button></div>
     <div class="err" id="signinErr"></div>
   </section>
@@ -130,21 +129,6 @@ details summary{cursor:pointer;font-weight:500}
     <div class="row"><button id="bannedSignOut">ออกจากระบบ</button></div>
   </section>
 
-  <!-- ใส่ Master Key ครั้งเดียวต่ออุปกรณ์ / ตั้ง Master Key ครั้งแรก -->
-  <section class="panel" id="unlockView" hidden>
-    <h2 id="unlockTitle">ปลดล็อกตู้บนเครื่องนี้</h2>
-    <p class="muted" id="unlockHint"></p>
-    <form id="unlockForm" style="display:flex;flex-direction:column;gap:10px">
-      <span class="keyfield"><input id="unlockKey" type="password" autocomplete="current-password" placeholder="Master Key" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
-      <div id="unlockNew" hidden style="display:flex;flex-direction:column;gap:8px">
-        <span class="keyfield"><input id="unlockKey2" type="password" autocomplete="new-password" placeholder="พิมพ์ Key อีกครั้ง (เฉพาะตู้ใหม่)" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
-        <div class="warn"><strong>ถ้าลืม Master Key จะกู้ข้อมูลคืนไม่ได้เลย</strong> ไม่มีปุ่มรีเซ็ต ควรจด Key ไว้ในที่ปลอดภัย</div>
-      </div>
-      <div class="row"><button class="primary" id="unlockBtn" type="submit">ปลดล็อก</button></div>
-    </form>
-    <div class="err" id="unlockErr"></div>
-  </section>
-
   <!-- ข้อความสถานะ: กำลังโหลด / ออฟไลน์ / ตั้งค่าไม่ครบ -->
   <section class="panel" id="msgView" hidden>
     <h2 id="msgTitle"></h2>
@@ -154,24 +138,6 @@ details summary{cursor:pointer;font-weight:500}
 
   <!-- ตู้ที่ปลดล็อกแล้ว -->
   <section id="vaultView" hidden style="display:flex;flex-direction:column;gap:14px">
-    <!-- คลาวด์ถูกเข้ารหัสด้วย Key อื่น -->
-    <div class="panel conflict" id="conflictPanel" hidden>
-      <h2>ข้อมูลบนคลาวด์เข้ารหัสต่างจากเครื่องนี้</h2>
-      <p class="muted">อาจมีอุปกรณ์อื่นเปิดเว็บรุ่นเก่าค้างไว้ หรือกู้คืนข้อมูลสำรอง เครื่องนี้จึงหยุดซิงก์ไว้ก่อนเพื่อไม่ให้เขียนทับกัน ลองรวมข้อมูลด้วย Master Key ก่อน</p>
-      <form id="cfMergeForm" style="display:flex;flex-direction:column;gap:8px">
-        <label>รวมข้อมูล: ใส่ Master Key
-          <div class="row">
-            <span class="keyfield grow"><input id="cfKey" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
-            <button class="primary" id="cfMergeBtn" type="submit">รวมข้อมูล</button>
-          </div>
-        </label>
-      </form>
-      <div class="confirm">
-        <button class="danger" id="cfOverwriteBtn">เขียนทับคลาวด์ด้วยข้อมูลเครื่องนี้</button>
-        <span class="err" id="cfErr"></span>
-      </div>
-    </div>
-
     <div class="toolbar">
       <input id="search" type="search" placeholder="ค้นหาชื่อเว็บหรือ username">
       <button class="primary" id="addBtn">+ เพิ่มรายการ</button>
@@ -200,7 +166,7 @@ details summary{cursor:pointer;font-weight:500}
       <label>พิมพ์ Key ของรายการอีกครั้ง
         <span class="keyfield"><input id="fKey2" class="mono" type="text" autocomplete="off" data-shown spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>ซ่อน</button></span>
       </label>
-      <p class="muted" style="font-size:.82rem">ถ้าลืม Key ของรายการ จะดูรหัสผ่านนี้ไม่ได้อีก แต่ยังลบรายการด้วย Master Key ได้</p>
+      <p class="muted" style="font-size:.82rem">ถ้าลืม Key ของรายการ จะดูรหัสผ่านนี้ไม่ได้อีก ไม่มีใครกู้ให้ได้ (ลบรายการได้ตามปกติ)</p>
       <div class="err" id="editErr"></div>
       <div class="row">
         <button class="primary" type="submit">บันทึก</button>
@@ -215,23 +181,17 @@ details summary{cursor:pointer;font-weight:500}
     <details>
       <summary>สำรองข้อมูล / ย้ายเครื่อง</summary>
       <div style="display:flex;flex-direction:column;gap:10px;margin-top:10px">
-        <p>ตู้ซิงก์ข้ามอุปกรณ์ผ่านคลาวด์แบบเข้ารหัสแล้ว แต่ควรเก็บข้อความสำรองไว้ด้วยเผื่อบัญชีมีปัญหา คัดลอกข้อความด้านล่าง (ยังเข้ารหัสอยู่) ไปเก็บไว้ แล้ววางกลับเมื่อต้องการกู้คืน ต้องใช้ Key เดิมเปิด การกู้คืนจะแทนที่ข้อมูลบนคลาวด์ด้วย</p>
+        <p>ตู้ซิงก์ข้ามอุปกรณ์ผ่านคลาวด์อยู่แล้ว แต่ควรเก็บข้อความสำรองไว้ด้วยเผื่อบัญชีมีปัญหา ในข้อความมีชื่อเว็บและ username แบบอ่านได้ ส่วนรหัสผ่านยังเข้ารหัสด้วย Key ของแต่ละรายการ การกู้คืนจะแทนที่ข้อมูลบนคลาวด์ด้วย</p>
         <div class="row"><button id="exportBtn">คัดลอกข้อความสำรอง</button></div>
         <textarea id="importBox" placeholder="วางข้อความสำรองที่นี่เพื่อกู้คืน"></textarea>
-        <label>Master Key ของข้อมูลสำรอง
-          <span class="keyfield"><input id="importKey" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
-        </label>
-        <label id="importCurRow" hidden>Master Key ปัจจุบัน (เมื่อข้อมูลสำรองใช้ Key อื่น)
-          <span class="keyfield"><input id="importCurKey" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
-        </label>
         <div class="confirm" id="importRow">
           <button id="importBtn">กู้คืนจากข้อความนี้</button>
           <span class="err" id="importErr"></span>
         </div>
       </div>
     </details>
-    <p>แต่ละรายการมี Key ของตัวเอง ดูหรือแก้ไขรหัสผ่านต้องใส่ Key ของรายการนั้นทุกครั้ง รหัสที่แสดงจะซ่อนเองใน 5 วินาที รายการเก่าที่ยังไม่ได้ตั้ง Key แยกใช้ Master Key</p>
-    <p>เครื่องนี้จำตู้ไว้เพื่อแสดงรายการโดยไม่ต้องใส่ Key กด “ออกจากระบบ” เพื่อให้เครื่องลืม</p>
+    <p>แต่ละรายการมี Key ของตัวเอง ดูหรือแก้ไขรหัสผ่านต้องใส่ Key ของรายการนั้นทุกครั้ง รหัสที่แสดงจะซ่อนเองใน 5 วินาที</p>
+    <p>ใช้เครื่องคนอื่นเสร็จแล้วให้กด “ออกจากระบบ” ทุกครั้ง</p>
   </div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>

@@ -8,35 +8,29 @@ service cloud.firestore {
       allow read: if request.auth != null && request.auth.uid == uid;
     }
 
-    // หนึ่งผู้ใช้ = หนึ่งเอกสาร เก็บเฉพาะ blob ที่เข้ารหัสแล้ว
+    // หนึ่งผู้ใช้ = หนึ่งเอกสาร: data = JSON ของรายการ
+    // (ชื่อเว็บ/username/โน้ต อ่านได้, รหัสผ่านเข้ารหัสในเบราว์เซอร์ด้วย Key ของแต่ละรายการ)
     match /users/{uid} {
+      // ต้องเป็นบัญชี Google ของเจ้าของ และไม่ถูกแบน
       function isOwner() {
         return request.auth != null && request.auth.uid == uid
+          && request.auth.token.firebase.sign_in_provider == 'google.com'
           && !exists(/databases/$(database)/documents/banned/$(request.auth.uid));
       }
-      // ตู้ใหม่และการเขียนต้องมาจากบัญชี Google เท่านั้น
-      // (บัญชีจากรุ่น Master Key อ่านและลบตู้ตัวเองได้ เพื่อให้แอปย้ายเข้าบัญชี Google)
-      function viaGoogle() {
-        return request.auth.token.firebase.sign_in_provider == 'google.com';
-      }
-      function validBlob() {
+      function validDoc() {
         let d = request.resource.data;
-        return d.keys().hasOnly(['v', 'iter', 'salt', 'iv', 'ct', 'updatedAt'])
-          && d.keys().hasAll(['v', 'iter', 'salt', 'iv', 'ct', 'updatedAt'])
-          && d.v is int && d.v >= 1
-          && d.iter is int && d.iter >= 600000          // ห้ามลดรอบ PBKDF2
-          && d.salt is string && d.salt.size() >= 16 && d.salt.size() <= 64
-          && d.iv is string && d.iv.size() == 16          // 12 ไบต์ → base64 16 ตัว
-          && d.ct is string && d.ct.size() > 0 && d.ct.size() < 900000
+        return d.keys().hasOnly(['v', 'data', 'ver', 'updatedAt'])
+          && d.keys().hasAll(['v', 'data', 'ver', 'updatedAt'])
+          && d.v == 4
+          && d.data is string && d.data.size() < 900000
+          && d.ver is string && d.ver.size() == 16
           && d.updatedAt == request.time;                 // ต้องเป็น serverTimestamp()
       }
 
-      allow read: if isOwner();
-      allow create: if isOwner() && viaGoogle() && validBlob();
-      // IV ต้องเปลี่ยนทุกครั้งที่เขียน (กัน IV ซ้ำ)
-      allow update: if isOwner() && viaGoogle() && validBlob() && request.resource.data.iv != resource.data.iv;
-      // แอปลบเฉพาะตู้ที่ว่างตอนออกจากตู้ และตู้รุ่นเก่าที่ย้ายมาแล้ว (ข้อมูลเข้ารหัสอยู่ เซิร์ฟเวอร์ตรวจไม่ได้ว่าว่างจริง จึงให้สิทธิ์เจ้าของ)
-      allow delete: if isOwner();
+      allow read, delete: if isOwner();
+      allow create: if isOwner() && validDoc();
+      // ver ต้องเปลี่ยนทุกครั้งที่เขียน (ใช้ตรวจว่าแก้ทับกันข้ามเครื่องหรือไม่)
+      allow update: if isOwner() && validDoc() && request.resource.data.ver != resource.data.ver;
     }
 
     match /{document=**} {
