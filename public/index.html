@@ -104,7 +104,6 @@ details summary{cursor:pointer;font-weight:500}
     <div class="row" id="topActions" hidden>
       <span class="muted" id="countLabel" style="font-size:.85rem"></span>
       <span class="sync" id="syncLabel" role="status" aria-live="polite"></span>
-      <button id="lockBtn">ล็อกตู้</button>
     </div>
   </header>
 
@@ -146,8 +145,8 @@ details summary{cursor:pointer;font-weight:500}
 
   <!-- ปลดล็อก -->
   <section class="panel" id="unlockView" hidden>
-    <h2>ปลดล็อกตู้</h2>
-    <p class="muted">ใส่ Master Key เพื่อถอดรหัสรายการทั้งหมด</p>
+    <h2>ปลดล็อกตู้บนเครื่องนี้</h2>
+    <p class="muted">ใส่ Master Key ครั้งเดียวต่ออุปกรณ์ ครั้งต่อไปจะเห็นรายการได้เลย ส่วนการดู แก้ไข หรือลบรหัสผ่านยังต้องใส่ Master Key ทุกครั้ง</p>
     <form id="unlockForm" class="row">
       <input id="unlockKey" class="grow" type="password" autocomplete="current-password" placeholder="Master Key">
       <button class="primary" id="unlockBtn" type="submit">ปลดล็อก</button>
@@ -168,7 +167,10 @@ details summary{cursor:pointer;font-weight:500}
             <button class="primary" id="cfMergeBtn" type="submit">รวมข้อมูล</button>
           </div>
         </label>
-        <p class="muted" style="font-size:.82rem">รายการของทั้งสองฝั่งจะถูกรวมกัน และตั้งแต่นี้ตู้จะใช้ Key ของคลาวด์ในการปลดล็อก</p>
+        <label id="cfKey2Row" hidden>Master Key ที่ใช้กับเครื่องนี้
+          <input id="cfKey2" type="password" autocomplete="off">
+        </label>
+        <p class="muted" style="font-size:.82rem">รายการของทั้งสองฝั่งจะถูกรวมกัน และตั้งแต่นี้ตู้จะใช้ Key ของคลาวด์</p>
       </form>
       <div class="confirm">
         <button class="danger" id="cfOverwriteBtn">เขียนทับคลาวด์ด้วยข้อมูลเครื่องนี้</button>
@@ -198,6 +200,9 @@ details summary{cursor:pointer;font-weight:500}
       <label>หมายเหตุ (ไม่บังคับ)
         <input id="fNote" autocomplete="off">
       </label>
+      <label id="fKeyRow" hidden>Master Key (ใช้เข้ารหัสรหัสผ่านนี้)
+        <input id="fKey" type="password" autocomplete="off">
+      </label>
       <div class="err" id="editErr"></div>
       <div class="row">
         <button class="primary" type="submit">บันทึก</button>
@@ -221,8 +226,8 @@ details summary{cursor:pointer;font-weight:500}
         </div>
       </div>
     </details>
-    <p>ดูหรือแก้ไขรหัสผ่านต้องใส่ Master Key อีกครั้ง รหัสที่แสดงจะซ่อนเองใน 5 วินาที</p>
-    <p>ตู้จะล็อกเองเมื่อไม่มีการใช้งาน 5 นาที</p>
+    <p>ดู แก้ไข หรือลบรหัสผ่านต้องใส่ Master Key ทุกครั้ง รหัสที่แสดงจะซ่อนเองใน 5 วินาที</p>
+    <p>เครื่องนี้จำตู้ไว้เพื่อแสดงรายการโดยไม่ต้องใส่ Key กด “ออกจากระบบ” เพื่อให้เครื่องลืม</p>
   </div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>

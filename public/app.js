@@ -1,13 +1,16 @@
 // UI + Firebase sync. Only sealed blobs {v, iter, salt, iv, ct} ever leave this file; the Master Key and plaintext stay in memory.
-import { ITER, b64, deriveKey, seal, unseal, openBlob, isBlob, merge, sameData } from './vault-core.js';
+// Two layers (see vault-core.js): the meta key opens the list and is remembered per device in IndexedDB (non-extractable);
+// each password needs the Master Key typed again, and the derived password key is dropped right after use.
+import { ITER, b64, unb64, deriveKeys, seal, unseal, sealPw, openPw, openVault, rekey, isBlob, merge, sameData } from './vault-core.js';
 import { firebaseConfig } from './firebase-config.js';
 
 const FB = 'https://www.gstatic.com/firebasejs/10.14.1/';
-const LEGACY = 'vault.v1', IDLE_MS = 5 * 60 * 1000, RETRY_MS = 20000, REVEAL_MS = 5000, MAX_AUTH_FAILS = 5;
+const LEGACY = 'vault.v1', RETRY_MS = 20000, REVEAL_MS = 5000, MAX_AUTH_FAILS = 5;
+const EMPTY = {items:[], tomb:{}};
 const $ = id => document.getElementById(id);
 
 // ---------- state ----------
-let user = null, session = null;               // session = {key, salt} while unlocked
+let user = null, session = null;               // session = {meta, salt} while the list is open
 let data = {items:[], tomb:{}};
 let base = null;      // iv of the remote version `data` is based on (null = no remote doc)
 let dirty = false;    // local changes not yet in Firestore
@@ -15,8 +18,8 @@ let replace = false;  // next push overwrites remote without the version check (
 let rev = 0;          // bumps on every local change, so a push that raced with an edit doesn't clear `dirty`
 let lastRemote;       // undefined = unknown, null = no doc, else blob
 let pendingRemote = null, keyConflict = null;
-let editingId = null, idleTimer = null, unwatch = null;
-let revealed = new Map(), authFails = 0;   // item id → auto-hide timer, for passwords unlocked by re-entering the Master Key
+let editingId = null, editPw = null, unwatch = null;   // editPw: password key held only while the editor is open
+let revealed = new Map(), authFails = 0;               // item id → {text, timer}
 let auth, db, fb;
 
 // ---------- local cache (offline copy, per Firebase user) ----------
@@ -34,6 +37,26 @@ function takeLegacy(){
   let v; try { v = JSON.parse(localStorage.getItem(LEGACY)); } catch {}
   return isBlob(v) ? v : null;
 }
+
+// ---------- remembered meta key (IndexedDB keeps CryptoKey objects without exposing their bytes) ----------
+const deviceKeys = {
+  async run(mode, fn){
+    const db = await new Promise((res, rej) => {
+      const r = indexedDB.open('vault', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('keys');
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+    return new Promise((res, rej) => {
+      const tx = db.transaction('keys', mode), req = fn(tx.objectStore('keys'));
+      tx.oncomplete = () => { db.close(); res(req.result); };
+      tx.onerror = tx.onabort = () => { db.close(); rej(tx.error); };
+    });
+  },
+  get(uid){ return this.run('readonly', s => s.get(uid)).catch(() => null); },
+  put(uid, v){ return this.run('readwrite', s => s.put(v, uid)).catch(() => toast('เบราว์เซอร์นี้จำตู้ไม่ได้ ครั้งหน้าต้องใส่ Master Key อีก')); },
+  del(uid){ return this.run('readwrite', s => s.delete(uid)).catch(() => {}); },
+};
+const rememberDevice = () => deviceKeys.put(user.uid, {salt: b64(session.salt), meta: session.meta});
 
 // ---------- Firestore ----------
 class Conflict extends Error { constructor(remote){ super('conflict'); this.remote = remote; } }
@@ -88,12 +111,12 @@ async function syncOnce(){
   setStatus('syncing');
   const myRev = rev;
   try {
-    const blob = await seal(s.key, s.salt, data);
+    const blob = await seal(s.meta, s.salt, data);
     await pushRemote(blob, replace ? undefined : base);
     if (session !== s) return;
     base = blob.iv; lastRemote = blob; replace = false;
     if (rev === myRev){ dirty = false; saveLocal(blob); }
-    else { saveLocal(await seal(s.key, s.salt, data)); again = true; }
+    else { saveLocal(await seal(s.meta, s.salt, data)); again = true; }
     try { localStorage.removeItem(LEGACY); } catch {}
     setStatus(dirty ? 'syncing' : 'synced');
   } catch (e){
@@ -112,21 +135,21 @@ async function absorb(remote){
   if (remote.iv === base) return;
   let theirs;
   try {
-    if (remote.salt !== b64(s.salt) || remote.iter !== ITER) throw 0;
-    theirs = await unseal(s.key, remote);
+    if (remote.salt !== b64(s.salt) || remote.iter !== ITER || (remote.v || 1) < 3) throw 0;
+    theirs = await unseal(s.meta, remote);
   } catch { if (session === s) showKeyConflict(remote); return; }
   if (session !== s) return;
   const merged = merge(data, theirs);
   const localChanged = !sameData(merged, data), needPush = !sameData(merged, theirs);
   data = merged; base = remote.iv;
-  if (needPush){ dirty = true; rev++; saveLocal(await seal(s.key, s.salt, data)); }
+  if (needPush){ dirty = true; rev++; saveLocal(await seal(s.meta, s.salt, data)); }
   else { dirty = false; saveLocal(remote); }
   if (localChanged){ render(); toast('อัปเดตรายการจากอุปกรณ์อื่นแล้ว'); }
 }
 
 async function persist(){
   dirty = true; rev++;
-  saveLocal(await seal(session.key, session.salt, data));
+  saveLocal(await seal(session.meta, session.salt, data));
   sync();
 }
 
@@ -165,14 +188,38 @@ function showLocked(){
   message('เชื่อมต่อคลาวด์ไม่ได้', 'เครื่องนี้ยังไม่มีสำเนาตู้ และตรวจไม่ได้ว่ามีตู้บนคลาวด์หรือไม่ ตรวจการเชื่อมต่ออินเทอร์เน็ตแล้วลองอีกครั้ง', prepare);
 }
 function clearSession(){
-  stopWatch(); clearTimeout(idleTimer); clearTimeout(retryTimer);
-  session = null; data = {items:[], tomb:{}}; editingId = null; keyConflict = null; pendingRemote = null;
-  for (const t of revealed.values()) clearTimeout(t);
+  stopWatch(); clearTimeout(retryTimer);
+  for (const r of revealed.values()) clearTimeout(r.timer);
   revealed.clear(); authFails = 0;
-  $('list').innerHTML = ''; $('editForm').hidden = true; $('unlockKey').value = ''; $('cfKey').value = '';
+  session = null; data = {items:[], tomb:{}}; editingId = null; editPw = null; keyConflict = null; pendingRemote = null;
+  $('list').innerHTML = ''; $('editForm').hidden = true; $('unlockKey').value = ''; $('cfKey').value = ''; $('cfKey2').value = '';
   $('conflictPanel').hidden = true;
 }
-function lock(){ clearSession(); showLocked(); }
+function useRecord(rec){ base = rec.base ?? null; dirty = !!rec.dirty; replace = !!rec.replace; rev = 0; }
+
+// open straight to the list when this device remembers the meta key for the current vault
+async function enter(){
+  const u = user, rec = u && cache.get();
+  if (rec && (rec.blob.v || 1) >= 3){
+    const dk = await deviceKeys.get(u.uid);
+    if (dk && dk.salt === rec.blob.salt){
+      try {
+        const d = await unseal(dk.meta, rec.blob);
+        if (user !== u) return;
+        session = {meta: dk.meta, salt: unb64(rec.blob.salt)}; data = d; useRecord(rec);
+        return enterVault();
+      } catch {}
+    }
+  }
+  if (user === u) showLocked();
+}
+// make this device forget the vault: next visit needs the Master Key
+async function forget(){
+  const uid = user?.uid;
+  clearSession();
+  if (uid) await deviceKeys.del(uid);
+  showLocked();
+}
 
 // after sign-in: pick the freshest copy (remote unless this device has unsynced changes)
 async function prepare(){
@@ -189,7 +236,7 @@ async function prepare(){
     rec = {blob: lastRemote, base: lastRemote.iv, dirty: false};
     cache.set(rec);
   }
-  showLocked();
+  enter();
 }
 
 // ---------- auth ----------
@@ -214,7 +261,9 @@ $('signInBtn').addEventListener('click', async () => {
   btn.disabled = false;
 });
 $('signOutBtn').addEventListener('click', async () => {
+  const uid = user?.uid;
   clearSession();
+  if (uid) await deviceKeys.del(uid);
   try { await fb.signOut(auth); } catch { toast('ออกจากระบบไม่สำเร็จ'); }
 });
 
@@ -236,35 +285,40 @@ $('setupBtn').addEventListener('click', async () => {
   if (a !== b) return err.textContent = 'Key ทั้งสองช่องไม่ตรงกัน ลองพิมพ์ใหม่';
   err.textContent = ''; $('setupBtn').disabled = true; $('setupBtn').textContent = 'กำลังสร้าง…';
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  session = {key: await deriveKey(a, salt), salt};
+  session = {meta: (await deriveKeys(a, salt)).meta, salt};
   data = {items:[], tomb:{}}; base = lastRemote?.iv ?? null; replace = false; rev = 0;
+  await rememberDevice();
   await persist();
   $('setKey').value = $('setKey2').value = '';
   $('setupBtn').disabled = false; $('setupBtn').textContent = 'สร้างตู้นิรภัย';
   enterVault();
 });
 
-// ---------- unlock ----------
+// ---------- unlock (once per device) ----------
 $('unlockForm').addEventListener('submit', async e => {
   e.preventDefault();
   const btn = $('unlockBtn'), err = $('unlockErr'), rec = cache.get();
-  if (!rec) return lock();
+  if (!rec) return showLocked();
   btn.disabled = true; btn.textContent = 'กำลังถอดรหัส…'; err.textContent = '';
   const pass = $('unlockKey').value;
   try {
-    const r = await openBlob(pass, rec.blob);
-    session = {key: r.key, salt: r.salt}; data = r.data;
-    base = rec.base ?? null; dirty = !!rec.dirty; replace = !!rec.replace; rev = 0;
-    // cloud re-keyed elsewhere but with the same Master Key → adopt its salt and merge now, while we still have the pass
+    const r = await openVault(pass, rec.blob);
+    let {keys, salt, data: d} = r, changed = !!r.upgraded;
+    useRecord(rec);
+    // cloud re-keyed elsewhere but with the same Master Key → move our passwords to its salt and merge, while we still have the pass
     if (!replace && lastRemote && lastRemote.salt !== rec.blob.salt){
       try {
-        const r2 = await openBlob(pass, lastRemote);
-        session = {key: r2.key, salt: r2.salt}; data = merge(data, r2.data);
-        base = lastRemote.iv; dirty = true; rev++;
+        const r2 = await openVault(pass, lastRemote);
+        d = merge(await rekey(d, keys.pw, r2.keys.pw), r2.data);
+        keys = r2.keys; salt = r2.salt; base = lastRemote.iv; changed = true;
       } catch {}
     }
+    session = {meta: keys.meta, salt}; data = d;
     $('unlockKey').value = '';
+    await rememberDevice();
+    if (changed) await persist();
     enterVault();
+    if (r.upgraded) toast('ปรับตู้เป็นแบบเข้ารหัส 2 ชั้นแล้ว');
   } catch {
     err.textContent = 'Key ไม่ถูกต้อง ถอดรหัสไม่ได้';
     $('unlockKey').select();
@@ -272,33 +326,57 @@ $('unlockForm').addEventListener('submit', async e => {
   btn.disabled = false; btn.textContent = 'ปลดล็อก';
 });
 
-function enterVault(){ show('vault'); render(); resetIdle(); startWatch(); sync(); }
-$('lockBtn').addEventListener('click', () => { lock(); toast('ล็อกแล้ว'); });
+function enterVault(){ show('vault'); render(); startWatch(); sync(); }
+
+// ---------- Master Key check for reveal / edit / delete ----------
+// derive from the typed pass + this vault's salt; correct iff the derived meta key opens something sealed with ours
+async function checkKey(pass){
+  const s = session;
+  if (!pass || !s) return null;
+  try {
+    const keys = await deriveKeys(pass, s.salt);
+    await unseal(keys.meta, await seal(s.meta, s.salt, EMPTY));
+    return session === s ? keys : null;
+  } catch { return null; }
+}
+function authFailed(){
+  if (++authFails < MAX_AUTH_FAILS) return false;
+  forget(); toast('ใส่ Key ผิดหลายครั้ง เครื่องนี้ลืมตู้แล้ว ต้องใส่ Master Key ใหม่');
+  return true;
+}
 
 // ---------- key conflict ----------
 let overwriteArmed = false;
 function showKeyConflict(remote){
   keyConflict = remote; overwriteArmed = false;
   $('cfOverwriteBtn').textContent = 'เขียนทับคลาวด์ด้วยข้อมูลเครื่องนี้'; $('cfErr').textContent = '';
+  $('cfKey2Row').hidden = true;
   $('conflictPanel').hidden = false;
   setStatus('conflict');
 }
-function closeKeyConflict(){ keyConflict = null; $('conflictPanel').hidden = true; $('cfKey').value = ''; $('cfErr').textContent = ''; }
+function closeKeyConflict(){ keyConflict = null; $('conflictPanel').hidden = true; $('cfKey').value = $('cfKey2').value = ''; $('cfErr').textContent = ''; }
 $('cfMergeForm').addEventListener('submit', async e => {
   e.preventDefault();
   const btn = $('cfMergeBtn'), remote = keyConflict, s = session;
   if (!remote) return;
   btn.disabled = true; btn.textContent = 'กำลังถอดรหัส…'; $('cfErr').textContent = '';
   try {
-    const r = await openBlob($('cfKey').value, remote);
+    let r;
+    try { r = await openVault($('cfKey').value, remote); }
+    catch { return $('cfErr').textContent = 'Key นี้เปิดข้อมูลบนคลาวด์ไม่ได้'; }
+    // our passwords are sealed under this device's Master Key: usually the same, otherwise ask for it
+    const mine = await checkKey($('cfKey2').value || $('cfKey').value);
+    if (!mine){
+      $('cfKey2Row').hidden = false; $('cfKey2').focus();
+      return $('cfErr').textContent = 'Key ของคลาวด์ต่างจากของเครื่องนี้ ใส่ Master Key ที่ใช้กับเครื่องนี้ด้วย';
+    }
     if (session !== s || keyConflict !== remote) return;
-    session = {key: r.key, salt: r.salt};
-    data = merge(data, r.data); base = remote.iv;
+    data = merge(await rekey(data, mine.pw, r.keys.pw), r.data);
+    session = {meta: r.keys.meta, salt: r.salt}; base = remote.iv;
     closeKeyConflict(); render();
+    await rememberDevice();
     await persist();
-    toast('รวมข้อมูลแล้ว ต่อจากนี้ใช้ Key ของคลาวด์ในการปลดล็อก');
-  } catch {
-    $('cfErr').textContent = 'Key นี้เปิดข้อมูลบนคลาวด์ไม่ได้';
+    toast('รวมข้อมูลแล้ว ต่อจากนี้ใช้ Key ของคลาวด์');
   } finally { btn.disabled = false; btn.textContent = 'รวมข้อมูล'; }
 });
 $('cfOverwriteBtn').addEventListener('click', async () => {
@@ -325,7 +403,9 @@ function render(){
     return;
   }
   if (!list.length){ $('list').innerHTML = '<div class="empty">ไม่พบรายการที่ตรงกับคำค้น</div>'; return; }
-  $('list').innerHTML = list.map(i => { const shown = revealed.has(i.id); return `
+  $('list').innerHTML = list.map(i => {
+    const shown = revealed.get(i.id), none = !i.pw;
+    return `
     <article class="item" data-id="${esc(i.id)}">
       <div class="item-head">
         <span class="item-title">${esc(i.site)}</span>
@@ -340,26 +420,39 @@ function render(){
         </button>
         <div class="pw-row">
           <button class="chip" data-act="copy" data-f="pass" title="${shown ? 'คลิกเพื่อคัดลอกรหัสผ่าน' : 'ใส่ Master Key เพื่อดูและคัดลอกรหัสผ่าน'}">
-            <span class="k">Pass</span><span class="v">${shown ? (esc(i.pass) || '<span class="muted">—</span>') : '••••••••••'}</span><span class="c">${shown ? 'คัดลอก' : 'ดูรหัส'}</span>
+            <span class="k">Pass</span><span class="v">${none ? '<span class="muted">—</span>' : shown ? esc(shown.text) : '••••••••••'}</span><span class="c">${none ? '' : shown ? 'คัดลอก' : 'ดูรหัส'}</span>
           </button>
-          <button class="ghost" data-act="peek" aria-label="${shown ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}">${shown ? 'ซ่อน' : 'ดู'}</button>
+          ${none ? '' : `<button class="ghost" data-act="peek" aria-label="${shown ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}">${shown ? 'ซ่อน' : 'ดู'}</button>`}
         </div>
       </div>
       ${i.note ? `<div class="item-note">${esc(i.note)}</div>` : ''}
       <form class="confirm auth" data-auth hidden>
-        <input type="password" autocomplete="off" placeholder="ใส่ Master Key เพื่อยืนยัน" aria-label="Master Key">
+        <span data-authlabel style="flex-basis:100%"></span>
+        <input type="password" autocomplete="off" placeholder="Master Key" aria-label="Master Key">
         <button class="primary" type="submit">ยืนยัน</button>
         <button type="button" data-act="authno">ยกเลิก</button>
         <span class="err" data-autherr></span>
       </form>
-      <div class="confirm" data-confirm hidden>
-        <span>ลบ “${esc(i.site)}” ถาวร?</span>
-        <button class="danger" data-act="delyes">ลบเลย</button>
-        <button data-act="delno">ไม่ลบ</button>
-      </div>
     </article>`; }).join('');
 }
 $('search').addEventListener('input', render);
+
+const AUTH_LABEL = {reveal: () => 'ใส่ Master Key เพื่อดูรหัสผ่าน', edit: () => 'ใส่ Master Key เพื่อแก้ไข',
+  del: item => `ใส่ Master Key เพื่อลบ “${item.site}” ถาวร`};
+function askKey(card, item, then){
+  const f = card.querySelector('[data-auth]');
+  f.dataset.then = then; f.hidden = false;
+  f.querySelector('[data-authlabel]').textContent = AUTH_LABEL[then](item);
+  f.querySelector('[type=submit]').className = then === 'del' ? 'danger' : 'primary';
+  f.querySelector('[type=submit]').textContent = then === 'del' ? 'ลบเลย' : 'ยืนยัน';
+  f.querySelector('[data-autherr]').textContent = '';
+  f.querySelector('input').focus();
+}
+function reveal(id, text){
+  conceal(id);
+  revealed.set(id, {text, timer: setTimeout(() => { revealed.delete(id); render(); }, REVEAL_MS)});
+}
+function conceal(id){ clearTimeout(revealed.get(id)?.timer); revealed.delete(id); }
 
 $('list').addEventListener('click', async e => {
   const btn = e.target.closest('[data-act]'); if (!btn) return;
@@ -367,72 +460,52 @@ $('list').addEventListener('click', async e => {
   if (!item) return render();
   const act = btn.dataset.act;
   if (act === 'copy'){
-    if (btn.dataset.f === 'pass' && !revealed.has(item.id)) return askKey(card, 'reveal');
-    const val = btn.dataset.f === 'user' ? item.user : item.pass;
+    const isPass = btn.dataset.f === 'pass';
+    if (isPass && item.pw && !revealed.has(item.id)) return askKey(card, item, 'reveal');
+    const val = isPass ? revealed.get(item.id)?.text : item.user;
     if (!val) return toast('ช่องนี้ว่างอยู่');
     await copy(val);
     btn.classList.add('copied'); btn.querySelector('.c').textContent = 'คัดลอกแล้ว';
     setTimeout(() => { btn.classList.remove('copied'); btn.querySelector('.c').textContent = 'คัดลอก'; }, 1500);
-    toast(btn.dataset.f === 'user' ? 'คัดลอก username แล้ว' : 'คัดลอกรหัสผ่านแล้ว');
+    toast(isPass ? 'คัดลอกรหัสผ่านแล้ว' : 'คัดลอก username แล้ว');
   }
   if (act === 'peek'){
     if (revealed.has(item.id)){ conceal(item.id); render(); }
-    else askKey(card, 'reveal');
+    else askKey(card, item, 'reveal');
   }
-  // the editor shows the password in clear, so it sits behind the same check
-  if (act === 'edit') revealed.has(item.id) ? openEditor(item) : askKey(card, 'edit');
+  if (act === 'edit') askKey(card, item, 'edit');
+  if (act === 'del') askKey(card, item, 'del');
   if (act === 'authno') card.querySelector('[data-auth]').hidden = true;
-  if (act === 'del') card.querySelector('[data-confirm]').hidden = false;
-  if (act === 'delno') card.querySelector('[data-confirm]').hidden = true;
-  if (act === 'delyes'){
-    data.items = data.items.filter(i => i.id !== item.id);
-    data.tomb[item.id] = Date.now();
-    await persist(); render(); toast('ลบแล้ว');
-  }
 });
-
-// ---------- re-enter Master Key to reveal / edit a password ----------
-function askKey(card, then){
-  const f = card.querySelector('[data-auth]');
-  f.dataset.then = then; f.hidden = false;
-  f.querySelector('[data-autherr]').textContent = '';
-  f.querySelector('input').focus();
-}
-// derive from the typed pass + this vault's salt and check it opens something sealed with the session key
-async function verifyKey(pass){
-  const s = session;
-  if (!pass || !s) return false;
-  try {
-    const key = await deriveKey(pass, s.salt);
-    await unseal(key, await seal(s.key, s.salt, {items:[], tomb:{}}));
-    return true;
-  } catch { return false; }
-}
-function reveal(id){
-  clearTimeout(revealed.get(id));
-  revealed.set(id, setTimeout(() => { revealed.delete(id); render(); }, REVEAL_MS));
-}
-function conceal(id){ clearTimeout(revealed.get(id)); revealed.delete(id); }
 
 $('list').addEventListener('submit', async e => {
   const f = e.target.closest('[data-auth]'); if (!f) return;
   e.preventDefault();
   const id = f.closest('.item').dataset.id, input = f.querySelector('input'), btn = f.querySelector('[type=submit]');
-  const s = session;
+  const label = btn.textContent;
   btn.disabled = true; btn.textContent = 'กำลังตรวจ…';
-  const ok = await verifyKey(input.value);
-  input.value = '';
-  if (session !== s) return;
-  btn.disabled = false; btn.textContent = 'ยืนยัน';
-  if (!ok){
-    if (++authFails >= MAX_AUTH_FAILS){ lock(); return toast('ใส่ Key ผิดหลายครั้ง ล็อกตู้แล้ว'); }
+  const keys = await checkKey(input.value);
+  input.value = ''; btn.disabled = false; btn.textContent = label;
+  if (!keys){
+    if (authFailed()) return;
     f.querySelector('[data-autherr]').textContent = 'Key ไม่ถูกต้อง';
     return input.focus();
   }
   authFails = 0;
-  reveal(id); render();
-  const item = data.items.find(i => i.id === id);
-  if (f.dataset.then === 'edit' && item) openEditor(item);
+  const item = data.items.find(i => i.id === id); if (!item) return render();
+  let text = '';
+  if (item.pw && f.dataset.then !== 'del'){
+    try { text = await openPw(keys.pw, item.pw); }
+    catch { f.querySelector('[data-autherr]').textContent = 'ถอดรหัสรายการนี้ไม่ได้'; return; }
+  }
+  if (f.dataset.then === 'reveal'){ reveal(id, text); render(); }
+  if (f.dataset.then === 'edit'){ f.hidden = true; openEditor(item, text, keys.pw); }
+  if (f.dataset.then === 'del'){
+    conceal(id);
+    data.items = data.items.filter(i => i.id !== id);
+    data.tomb[id] = Date.now();
+    await persist(); render(); toast('ลบแล้ว');
+  }
 });
 
 async function copy(text){
@@ -445,16 +518,20 @@ async function copy(text){
 }
 
 // ---------- editor ----------
-function openEditor(item){
-  editingId = item ? item.id : null;
+// editing arrives already authenticated (pwKey); adding asks for the Master Key inside the form, only if a password is set
+let editOrigPass = '';
+function openEditor(item, pass = '', pwKey = null){
+  editingId = item ? item.id : null; editPw = pwKey; editOrigPass = pass;
   $('editTitle').textContent = item ? 'แก้ไขรายการ' : 'เพิ่มรายการ';
   $('fSite').value = item?.site || ''; $('fUser').value = item?.user || '';
-  $('fPass').value = item?.pass || ''; $('fNote').value = item?.note || '';
+  $('fPass').value = pass; $('fNote').value = item?.note || ''; $('fKey').value = '';
+  $('fKeyRow').hidden = !!pwKey;
   $('editErr').textContent = '';
   $('editForm').hidden = false; $('fSite').focus();
 }
+function closeEditor(){ $('editForm').hidden = true; $('fPass').value = $('fKey').value = ''; editPw = null; editingId = null; editOrigPass = ''; }
 $('addBtn').addEventListener('click', () => openEditor(null));
-$('cancelBtn').addEventListener('click', () => { $('editForm').hidden = true; });
+$('cancelBtn').addEventListener('click', closeEditor);
 $('genBtn').addEventListener('click', () => {
   // rejection sampling: no modulo bias
   const cs = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*-_+=?';
@@ -464,42 +541,52 @@ $('genBtn').addEventListener('click', () => {
 });
 $('editForm').addEventListener('submit', async e => {
   e.preventDefault();
-  const site = $('fSite').value.trim();
-  if (!site) return $('editErr').textContent = 'ใส่ชื่อเว็บหรือแอปก่อนบันทึก';
-  const fields = {site, user:$('fUser').value.trim(), pass:$('fPass').value, note:$('fNote').value.trim(), mt:Date.now()};
+  const site = $('fSite').value.trim(), pass = $('fPass').value, err = $('editErr');
+  if (!site) return err.textContent = 'ใส่ชื่อเว็บหรือแอปก่อนบันทึก';
   const cur = editingId && data.items.find(i => i.id === editingId);
+  let pw = cur?.pw ?? null;
+  if (pass !== editOrigPass || !cur){
+    if (!pass) pw = null;
+    else {
+      let key = editPw;
+      if (!key){
+        const btn = e.submitter; if (btn) btn.disabled = true;
+        const keys = await checkKey($('fKey').value);
+        if (btn) btn.disabled = false;
+        if (!keys){ if (!authFailed()) err.textContent = 'Master Key ไม่ถูกต้อง ใช้เข้ารหัสรหัสผ่านนี้ไม่ได้'; return; }
+        authFails = 0; key = keys.pw;
+      }
+      pw = await sealPw(key, pass);
+    }
+  }
+  const fields = {site, user:$('fUser').value.trim(), note:$('fNote').value.trim(), pw, mt:Date.now()};
   if (cur) Object.assign(cur, fields);
   // also covers an item deleted on another device while this editor was open: its newer mt outlives the tombstone
   else data.items.push({id: editingId || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random())), ...fields});
-  await persist();
-  $('editForm').hidden = true; render(); toast('บันทึกและเข้ารหัสแล้ว');
+  if (editingId) conceal(editingId);
+  closeEditor();
+  await persist(); render(); toast('บันทึกและเข้ารหัสแล้ว');
 });
 
 // ---------- backup ----------
 $('exportBtn').addEventListener('click', async () => {
-  await copy(JSON.stringify(await seal(session.key, session.salt, data)));
+  await copy(JSON.stringify(await seal(session.meta, session.salt, data)));
   toast('คัดลอกข้อความสำรองแล้ว นำไปเก็บไว้ในที่ปลอดภัย');
 });
 let importArmed = false;
-$('importBtn').addEventListener('click', () => {
+$('importBtn').addEventListener('click', async () => {
   const err = $('importErr');
   let v; try { v = JSON.parse($('importBox').value); } catch {}
   if (!isBlob(v)) return err.textContent = 'ข้อความนี้ไม่ใช่ข้อความสำรองของตู้นี้';
   if (v.iter !== ITER) return err.textContent = 'ข้อความสำรองนี้ใช้การตั้งค่าเข้ารหัสที่ไม่รองรับ';
   if (!importArmed){ importArmed = true; $('importBtn').textContent = 'ยืนยัน: แทนที่ข้อมูลปัจจุบัน'; err.textContent = 'ข้อมูลในตู้และบนคลาวด์จะถูกแทนที่'; return; }
-  // pushed (overwriting the cloud) after the next successful unlock
+  // pushed (overwriting the cloud) once it is opened with its Master Key
   cache.set({blob: v, base, dirty: true, replace: true});
   importArmed = false; $('importBox').value = '';
   $('importBtn').textContent = 'กู้คืนจากข้อความนี้'; err.textContent = '';
-  lock(); toast('กู้คืนแล้ว ใส่ Key ของข้อมูลสำรองเพื่อเปิด');
+  await forget(); toast('กู้คืนแล้ว ใส่ Key ของข้อมูลสำรองเพื่อเปิด');
 });
 
-// ---------- auto-lock ----------
-function resetIdle(){
-  clearTimeout(idleTimer);
-  if (session) idleTimer = setTimeout(() => { lock(); toast('ล็อกอัตโนมัติแล้ว'); }, IDLE_MS);
-}
-['click','keydown','pointermove','touchstart'].forEach(ev => document.addEventListener(ev, resetIdle, {passive:true}));
 window.addEventListener('online', () => sync());
 window.addEventListener('offline', () => session && setStatus('offline'));
 document.addEventListener('visibilitychange', () => { if (!document.hidden && dirty) sync(); });
@@ -511,7 +598,7 @@ let tt; function toast(msg){
 
 // ---------- boot ----------
 async function boot(){
-  if (!crypto.subtle) return message('เบราว์เซอร์ไม่รองรับ', 'เบราว์เซอร์นี้ไม่รองรับการเข้ารหัส กรุณาเปิดด้วยเบราว์เซอร์รุ่นใหม่ผ่าน https');
+  if (!crypto.subtle || !window.indexedDB) return message('เบราว์เซอร์ไม่รองรับ', 'เบราว์เซอร์นี้ไม่รองรับการเข้ารหัส กรุณาเปิดด้วยเบราว์เซอร์รุ่นใหม่ผ่าน https');
   message('กำลังโหลด…', 'รอสักครู่');
   let config;
   try {

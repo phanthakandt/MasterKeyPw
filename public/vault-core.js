@@ -1,8 +1,15 @@
 // Crypto + data model of the vault. Nothing in this file touches the network.
-// Blob on disk / in Firestore: {v, iter, salt, iv, ct} (base64). Payload inside ct: {items:[...], tomb:{id: deletedAtMs}}.
-export const ITER = 600000, FORMAT = 2;
+// Blob on disk / in Firestore: {v, iter, salt, iv, ct} (base64).
+//
+// v3 (two layers): PBKDF2(Master Key, salt, 600k) → 256 bits → HKDF →
+//   meta key: seals the payload {items:[{id, site, user, note, mt, pw}], tomb:{id: deletedAtMs}}
+//             (this key may be remembered on a device so the list opens without the Master Key)
+//   pw key:   seals each password separately as pw = {iv, ct}; never stored, re-derived on every use
+// v1/v2 (legacy): the whole vault, passwords in clear, sealed with the PBKDF2 key directly.
+export const ITER = 600000, FORMAT = 3;
 const TOMB_TTL = 365 * 24 * 3600 * 1000;
 const enc = new TextEncoder(), dec = new TextDecoder();
+const AES = {name:'AES-GCM', length:256};
 
 // chunked so large vaults don't blow the call stack
 export function b64(buf){
@@ -12,10 +19,19 @@ export function b64(buf){
 }
 export const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
-export async function deriveKey(pass, salt){
-  const base = await crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey({name:'PBKDF2', salt, iterations:ITER, hash:'SHA-256'},
-    base, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+async function pbkdf2Bits(pass, salt){
+  const base = await crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveBits']);
+  return crypto.subtle.deriveBits({name:'PBKDF2', salt, iterations:ITER, hash:'SHA-256'}, base, 256);
+}
+// legacy v1/v2 key
+async function legacyKey(pass, salt){
+  return crypto.subtle.importKey('raw', await pbkdf2Bits(pass, salt), AES, false, ['decrypt']);
+}
+export async function deriveKeys(pass, salt){
+  const hk = await crypto.subtle.importKey('raw', await pbkdf2Bits(pass, salt), 'HKDF', false, ['deriveKey']);
+  const sub = info => crypto.subtle.deriveKey({name:'HKDF', hash:'SHA-256', salt:new Uint8Array(32), info:enc.encode(info)},
+    hk, AES, false, ['encrypt','decrypt']);
+  return {meta: await sub('vault/meta/v3'), pw: await sub('vault/pw/v3')};
 }
 
 export function isBlob(v){
@@ -23,35 +39,54 @@ export function isBlob(v){
 }
 
 // fresh random IV on every call — never reuse
-export async function seal(key, salt, data){
+async function encrypt(key, text){
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, enc.encode(JSON.stringify(data)));
-  return {v:FORMAT, iter:ITER, salt:b64(salt), iv:b64(iv), ct:b64(ct)};
+  const ct = await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, enc.encode(text));
+  return {iv:b64(iv), ct:b64(ct)};
+}
+async function decrypt(key, {iv, ct}){
+  return dec.decode(await crypto.subtle.decrypt({name:'AES-GCM', iv:unb64(iv)}, key, unb64(ct)));
 }
 
-export async function unseal(key, blob){
-  const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv:unb64(blob.iv)}, key, unb64(blob.ct));
-  const d = JSON.parse(dec.decode(pt));
-  // v1 payload was a bare array of items
-  return Array.isArray(d) ? {items:d, tomb:{}} : {items:d.items || [], tomb:d.tomb || {}};
+export async function seal(metaKey, salt, data){
+  return {v:FORMAT, iter:ITER, salt:b64(salt), ...await encrypt(metaKey, JSON.stringify(data))};
 }
+export async function unseal(metaKey, blob){
+  const d = JSON.parse(await decrypt(metaKey, blob));
+  return {items:d.items || [], tomb:d.tomb || {}};
+}
+export const sealPw = (pwKey, text) => encrypt(pwKey, text);
+export const openPw = (pwKey, pw) => decrypt(pwKey, pw);
 
-// iteration count is fixed: refuse anything weaker (or different) instead of silently accepting it
-export async function openBlob(pass, blob){
+// Open any blob with the Master Key. Legacy blobs are upgraded to v3 on the fly (`upgraded: true`).
+// The iteration count is fixed: refuse anything weaker (or different) instead of silently accepting it.
+export async function openVault(pass, blob){
   if (!isBlob(blob) || blob.iter !== ITER) throw new Error('unsupported');
-  const salt = unb64(blob.salt);
-  const key = await deriveKey(pass, salt);
-  return {key, salt, data: await unseal(key, blob)};
+  const salt = unb64(blob.salt), keys = await deriveKeys(pass, salt);
+  if ((blob.v || 1) >= 3) return {keys, salt, data: await unseal(keys.meta, blob)};
+  const old = JSON.parse(await decrypt(await legacyKey(pass, salt), blob));
+  const o = Array.isArray(old) ? {items:old, tomb:{}} : {items:old.items || [], tomb:old.tomb || {}};
+  const items = await Promise.all(o.items.map(async ({pass: p, ...rest}) => ({...rest, pw: p ? await sealPw(keys.pw, p) : null})));
+  return {keys, salt, data:{items, tomb:o.tomb}, upgraded:true};
 }
 
-// Per-item last-writer-wins by `mt`; a tombstone beats any version not newer than the deletion.
+// re-encrypt every password from one pw key to another (vault moving to another salt / Master Key)
+export async function rekey(data, fromPw, toPw){
+  const items = await Promise.all(data.items.map(async it =>
+    it.pw ? {...it, pw: await sealPw(toPw, await openPw(fromPw, it.pw))} : it));
+  return {items, tomb:{...data.tomb}};
+}
+
+// Per-item last-writer-wins by `mt` (ties broken by content so every device picks the same winner);
+// a tombstone beats any version not newer than the deletion.
+const itemKey = i => JSON.stringify([i.site ?? '', i.user ?? '', i.note ?? '', i.pw?.ct ?? '']);
 export function merge(a, b){
   const now = Date.now(), tomb = {}, out = new Map();
   for (const t of [a.tomb, b.tomb]) for (const [id, ms] of Object.entries(t))
     if (now - ms < TOMB_TTL) tomb[id] = Math.max(tomb[id] || 0, ms);
   for (const it of [...a.items, ...b.items]){
-    const cur = out.get(it.id);
-    if (!cur || (it.mt || 0) > (cur.mt || 0)) out.set(it.id, it);
+    const cur = out.get(it.id), m = it.mt || 0, cm = cur?.mt || 0;
+    if (!cur || m > cm || (m === cm && itemKey(it) > itemKey(cur))) out.set(it.id, it);
   }
   for (const [id, ms] of Object.entries(tomb)){
     const it = out.get(id);
@@ -61,8 +96,7 @@ export function merge(a, b){
 }
 
 const canon = d => JSON.stringify([
-  [...d.items].sort((x, y) => x.id < y.id ? -1 : x.id > y.id ? 1 : 0)
-    .map(i => [i.id, i.mt || 0, i.site ?? '', i.user ?? '', i.pass ?? '', i.note ?? '']),
+  [...d.items].sort((x, y) => x.id < y.id ? -1 : x.id > y.id ? 1 : 0).map(i => [i.id, i.mt || 0, itemKey(i)]),
   Object.entries(d.tomb).sort()
 ]);
 export const sameData = (a, b) => canon(a) === canon(b);
