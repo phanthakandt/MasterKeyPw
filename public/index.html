@@ -133,24 +133,16 @@ details summary{cursor:pointer;font-weight:500}
     <div class="row" id="msgActions" hidden><button id="msgRetry">ลองอีกครั้ง</button></div>
   </section>
 
-  <!-- ยังไม่มีตู้ของ Key นี้: ยืนยันก่อนสร้าง (กันพิมพ์ผิดแล้วได้ตู้เปล่า) -->
-  <form class="panel" id="setupView" hidden>
-    <h2>ยังไม่มีตู้ของ Master Key นี้</h2>
-    <p class="muted">ถ้าเคยมีตู้อยู่แล้ว แปลว่าน่าจะพิมพ์ Key ผิด ให้กดย้อนกลับ ถ้าต้องการสร้างตู้ใหม่ ให้พิมพ์ Key เดิมอีกครั้ง</p>
-    <div class="warn"><strong>Key นี้คือทุกอย่าง</strong> ใช้ทั้งเข้าบัญชีและเปิดตู้ ถ้าลืมจะกู้ข้อมูลคืนไม่ได้เลย และใครรู้ Key ก็เข้าตู้ได้จากทุกที่ ควรใช้ Key ยาวๆ ที่ไม่ใช้ซ้ำกับที่อื่น</div>
-    <div class="meter"><i id="meterBar"></i></div>
-    <label>พิมพ์ Master Key อีกครั้ง
-      <span class="keyfield"><input id="setKey2" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
-    </label>
-    <div class="err" id="setupErr"></div>
-    <div class="row">
-      <button class="primary" id="setupBtn" type="submit">สร้างตู้ใหม่</button>
-      <button type="button" id="setupBack">ย้อนกลับ</button>
-    </div>
-  </form>
-
   <!-- ตู้ที่ปลดล็อกแล้ว -->
   <section id="vaultView" hidden style="display:flex;flex-direction:column;gap:14px">
+    <!-- เพิ่งสร้างตู้ใหม่ (ไม่มีขั้นยืนยัน จึงบอกไว้เผื่อพิมพ์ Key ผิด) -->
+    <div class="warn" id="newVaultNote" hidden style="display:flex;flex-direction:column;gap:8px">
+      <span><strong>สร้างตู้ใหม่ให้แล้ว</strong> ถ้าตั้งใจเปิดตู้เดิม แปลว่าพิมพ์ Master Key ผิด ให้ออกแล้วลองใหม่ ถ้าตั้งใจสร้างตู้ใหม่ ให้จด Key นี้ไว้ เพราะถ้าลืมจะเปิดตู้ไม่ได้อีก</span>
+      <span class="row">
+        <button type="button" id="newVaultSignOut">ออกแล้วลองใหม่</button>
+        <button type="button" class="ghost" id="newVaultClose">เข้าใจแล้ว</button>
+      </span>
+    </div>
     <!-- คลาวด์ถูกเข้ารหัสด้วย Key อื่น -->
     <div class="panel conflict" id="conflictPanel" hidden>
       <h2>ข้อมูลบนคลาวด์เข้ารหัสต่างจากเครื่องนี้</h2>

@@ -6,7 +6,7 @@ import { ITER, b64, unb64, loginCreds, deriveKeys, seal, unseal, sealItem, resea
 import { firebaseConfig } from './firebase-config.js';
 
 const FB = 'https://www.gstatic.com/firebasejs/10.14.1/';
-const LEGACY = 'vault.v1', RETRY_MS = 20000, REVEAL_MS = 5000, MAX_AUTH_FAILS = 5;
+const LEGACY = 'vault.v1', RETRY_MS = 20000, REVEAL_MS = 5000, MAX_AUTH_FAILS = 5, MIN_MASTER_KEY = 8;
 const NOT_FOUND = new Set(['auth/invalid-credential', 'auth/invalid-login-credentials', 'auth/user-not-found']);
 const EMPTY = {items:[], tomb:{}};
 const $ = id => document.getElementById(id);
@@ -22,7 +22,7 @@ let lastRemote;       // undefined = unknown, null = no doc, else blob
 let pendingRemote = null, keyConflict = null;
 let editingId = null, editKey = null, unwatch = null;  // editKey: the item's key, held only while its editor is open
 let revealed = new Map(), authFails = 0;               // item id → {text, timer}
-let loggingIn = false, pendingCreate = null;           // pendingCreate: {pass, cred} while asking to confirm a new vault
+let loggingIn = false;
 let auth, db, fb;
 
 // ---------- local cache (offline copy, per Firebase user) ----------
@@ -193,9 +193,8 @@ document.addEventListener('click', e => {
 // ---------- views ----------
 function show(view){
   resetKeyFields();
-  for (const v of ['login','msg','setup','vault']) $(v + 'View').hidden = view !== v;
+  for (const v of ['login','msg','vault']) $(v + 'View').hidden = view !== v;
   $('topActions').hidden = $('foot').hidden = $('acct').hidden = view !== 'vault';
-  if (view === 'setup') $('setKey2').focus();
   if (view === 'login') $('loginKey').focus();
 }
 function message(title, body, retry){
@@ -209,7 +208,7 @@ function clearSession(){
   revealed.clear(); authFails = 0;
   session = null; data = {items:[], tomb:{}}; editingId = null; editKey = null; keyConflict = null; pendingRemote = null;
   $('list').innerHTML = ''; $('editForm').hidden = true; $('cfKey').value = '';
-  $('conflictPanel').hidden = true;
+  $('conflictPanel').hidden = true; $('newVaultNote').hidden = true;
 }
 function resetAccount(u){
   clearSession();
@@ -259,6 +258,7 @@ function loginError(e){
   if (c === 'auth/network-request-failed') return 'เชื่อมต่อเครือข่ายไม่ได้ ลองอีกครั้ง';
   if (e?.message === 'wrong-vault-key') return 'ตู้ในบัญชีนี้เปิดด้วย Key นี้ไม่ได้';
   if (e?.message === 'offline') return 'เชื่อมต่อคลาวด์ไม่ได้ ตรวจอินเทอร์เน็ตแล้วลองอีกครั้ง';
+  if (e?.message === 'short-new') return `ไม่พบตู้ของ Key นี้ ถ้าจะสร้างตู้ใหม่ Key ต้องยาวอย่างน้อย ${MIN_MASTER_KEY} ตัวอักษร`;
   return 'เข้าตู้ไม่สำเร็จ (' + (c || e?.message || 'ไม่ทราบสาเหตุ') + ')';
 }
 $('loginForm').addEventListener('submit', async e => {
@@ -273,10 +273,14 @@ $('loginForm').addEventListener('submit', async e => {
     try { u = (await fb.signInWithEmailAndPassword(auth, cred.email, cred.password)).user; }
     catch (e2){
       if (!NOT_FOUND.has(e2?.code)) throw e2;
-      // no account for this Key yet. An older vault on this device that opens with it proves it isn't a typo → move it over.
+      // no account for this Key yet: move over an older vault on this device that opens with it, otherwise start a new one
       seed = await findLocalVault(pass);
-      if (!seed){ pendingCreate = {pass, cred}; return showCreate(pass); }
-      u = (await fb.createUserWithEmailAndPassword(auth, cred.email, cred.password)).user;
+      if (!seed && pass.length < MIN_MASTER_KEY) throw new Error('short-new');
+      try { u = (await fb.createUserWithEmailAndPassword(auth, cred.email, cred.password)).user; }
+      catch (e3){
+        if (e3?.code !== 'auth/email-already-in-use') throw e3;
+        u = (await fb.signInWithEmailAndPassword(auth, cred.email, cred.password)).user;
+      }
     }
     await openAccount(u, pass, seed);
     if (seed) toast('ย้ายตู้เดิมเข้าบัญชี Master Key แล้ว');
@@ -330,51 +334,13 @@ async function createVault(pass){
   await rememberDevice();
   await persist();
   enterVault();
+  // no confirm step, so a mistyped Key lands here: say so plainly
+  $('newVaultNote').hidden = false;
 }
-
-// ---------- new vault: confirm the Key (a typo would otherwise silently create an empty vault) ----------
-function strength(p){
-  let s = 0;
-  if (p.length >= 8) s++; if (p.length >= 12) s++; if (p.length >= 16) s++;
-  if (/[a-z]/.test(p) && /[A-Z]/.test(p)) s++; if (/\d/.test(p)) s++; if (/[^A-Za-z0-9]/.test(p)) s++;
-  return Math.min(s, 5);
-}
-function showCreate(pass){
-  const s = strength(pass), bar = $('meterBar');
-  bar.style.width = (s/5*100)+'%';
-  bar.style.background = s <= 2 ? 'var(--danger)' : s <= 3 ? 'var(--brass)' : 'var(--ok)';
-  $('setKey2').value = '';
-  $('setupErr').textContent = pass.length < 8 ? 'Key นี้สั้นเกินไป ตู้ใหม่ต้องใช้ Key อย่างน้อย 8 ตัวอักษร กดย้อนกลับแล้วตั้งใหม่' : '';
-  $('setupBtn').disabled = pass.length < 8;
-  show('setup');
-}
-$('setupBack').addEventListener('click', () => { pendingCreate = null; show('login'); });
-$('setupView').addEventListener('submit', async e => {
-  e.preventDefault();
-  const pc = pendingCreate, err = $('setupErr'), btn = $('setupBtn');
-  if (!pc) return show('login');
-  if ($('setKey2').value !== pc.pass) return err.textContent = 'Key ไม่ตรงกับที่พิมพ์ครั้งแรก ถ้าครั้งแรกพิมพ์ผิด กดย้อนกลับ';
-  err.textContent = ''; btn.disabled = true; btn.textContent = 'กำลังสร้าง…';
-  loggingIn = true;
-  try {
-    let u;
-    try { u = (await fb.createUserWithEmailAndPassword(auth, pc.cred.email, pc.cred.password)).user; }
-    catch (e2){
-      if (e2?.code !== 'auth/email-already-in-use') throw e2;
-      u = (await fb.signInWithEmailAndPassword(auth, pc.cred.email, pc.cred.password)).user;
-    }
-    pendingCreate = null; $('setKey2').value = '';
-    await openAccount(u, pc.pass, null);
-  } catch (e2){
-    console.warn(e2);
-    err.textContent = loginError(e2);
-    if (auth.currentUser) await forget();
-  } finally {
-    loggingIn = false; btn.disabled = false; btn.textContent = 'สร้างตู้ใหม่';
-  }
-});
 
 $('signOutBtn').addEventListener('click', forget);
+$('newVaultSignOut').addEventListener('click', forget);
+$('newVaultClose').addEventListener('click', () => { $('newVaultNote').hidden = true; });
 
 function enterVault(){ show('vault'); render(); startWatch(); sync(); }
 
