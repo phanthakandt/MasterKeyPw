@@ -177,8 +177,22 @@ function setStatus(st, err){
   lastErr = msg;
 }
 
+// ---------- show/hide toggle next to Key fields (fields marked data-shown start visible) ----------
+function setShown(input, shown){
+  input.type = shown ? 'text' : 'password';
+  input.parentElement.querySelector('[data-peekfor]').textContent = shown ? 'ซ่อน' : 'แสดง';
+}
+const resetKeyFields = () => document.querySelectorAll('.keyfield input').forEach(i => setShown(i, i.hasAttribute('data-shown')));
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-peekfor]'); if (!b) return;
+  e.preventDefault();
+  const i = b.parentElement.querySelector('input');
+  setShown(i, i.type === 'password'); i.focus();
+});
+
 // ---------- views ----------
 function show(view){
+  resetKeyFields();
   for (const v of ['login','msg','setup','vault']) $(v + 'View').hidden = view !== v;
   $('topActions').hidden = $('foot').hidden = $('acct').hidden = view !== 'vault';
   if (view === 'setup') $('setKey2').focus();
@@ -459,7 +473,7 @@ function render(){
       ${i.note ? `<div class="item-note">${esc(i.note)}</div>` : ''}
       <form class="confirm auth" data-auth hidden>
         <span data-authlabel style="flex-basis:100%"></span>
-        <input type="password" autocomplete="off" placeholder="Key" aria-label="Key">
+        <span class="keyfield"><input type="password" autocomplete="off" placeholder="Key" aria-label="Key" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
         <button class="primary" type="submit">ยืนยัน</button>
         <button type="button" data-act="authno">ยกเลิก</button>
         <span class="err" data-autherr></span>
@@ -562,6 +576,7 @@ function openEditor(item, pass = '', k = null){
   $('editTitle').textContent = item ? 'แก้ไขรายการ' : 'เพิ่มรายการ';
   $('fSite').value = item?.site || ''; $('fUser').value = item?.user || '';
   $('fPass').value = pass; $('fNote').value = item?.note || ''; $('fKey').value = $('fKey2').value = '';
+  setShown($('fKey'), true); setShown($('fKey2'), true);
   $('fKeyLabel').textContent = k ? 'เปลี่ยน Key ของรายการนี้ (เว้นว่างเพื่อใช้ Key เดิม)' : 'Key ของรายการนี้ (ใช้ดูรหัสผ่าน)';
   $('editErr').textContent = '';
   $('editForm').hidden = false; $('fSite').focus();

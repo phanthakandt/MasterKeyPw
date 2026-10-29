@@ -83,7 +83,10 @@ button:disabled{opacity:.6;cursor:default}
 .empty{text-align:center;padding:36px 16px;border:1px dashed var(--line);border-radius:10px;color:var(--muted)}
 .confirm{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:.88rem}
 .conflict{border-color:var(--danger)}
-.auth input{flex:1 1 180px;width:auto}
+.auth .keyfield{flex:1 1 180px}
+.keyfield{display:flex;gap:4px;align-items:center;min-width:0}
+.keyfield input{flex:1;min-width:0}
+.keyfield .ghost{flex:none}
 .auth .err{flex-basis:100%;min-height:0}
 .auth .err:empty{display:none}
 .toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translateX(-50%) translateY(20px);opacity:0;
@@ -117,7 +120,7 @@ details summary{cursor:pointer;font-weight:500}
     <h2>เข้าตู้</h2>
     <p class="muted">ใส่ Master Key เพื่อเข้าตู้และซิงก์ข้ามอุปกรณ์ ไม่ต้องใช้อีเมล ตัว Key ไม่ถูกส่งออกจากเบราว์เซอร์ คลาวด์ได้รับเฉพาะค่าที่แปลงมาแล้วและข้อมูลที่เข้ารหัสแล้ว ใส่ครั้งเดียวต่ออุปกรณ์ ครั้งต่อไปจะเห็นรายการได้เลย</p>
     <form id="loginForm" class="row">
-      <input id="loginKey" class="grow" type="password" autocomplete="current-password" placeholder="Master Key">
+      <span class="keyfield grow"><input id="loginKey" type="password" autocomplete="current-password" placeholder="Master Key" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
       <button class="primary" id="loginBtn" type="submit">เข้าตู้</button>
     </form>
     <div class="err" id="loginErr"></div>
@@ -137,7 +140,7 @@ details summary{cursor:pointer;font-weight:500}
     <div class="warn"><strong>Key นี้คือทุกอย่าง</strong> ใช้ทั้งเข้าบัญชีและเปิดตู้ ถ้าลืมจะกู้ข้อมูลคืนไม่ได้เลย และใครรู้ Key ก็เข้าตู้ได้จากทุกที่ ควรใช้ Key ยาวๆ ที่ไม่ใช้ซ้ำกับที่อื่น</div>
     <div class="meter"><i id="meterBar"></i></div>
     <label>พิมพ์ Master Key อีกครั้ง
-      <input id="setKey2" type="password" autocomplete="new-password">
+      <span class="keyfield"><input id="setKey2" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
     </label>
     <div class="err" id="setupErr"></div>
     <div class="row">
@@ -155,7 +158,7 @@ details summary{cursor:pointer;font-weight:500}
       <form id="cfMergeForm" style="display:flex;flex-direction:column;gap:8px">
         <label>รวมข้อมูล: ใส่ Master Key
           <div class="row">
-            <input id="cfKey" class="grow" type="password" autocomplete="off">
+            <span class="keyfield grow"><input id="cfKey" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
             <button class="primary" id="cfMergeBtn" type="submit">รวมข้อมูล</button>
           </div>
         </label>
@@ -177,11 +180,11 @@ details summary{cursor:pointer;font-weight:500}
         <input id="fSite" required placeholder="เช่น Gmail, ธนาคาร, Shopee">
       </label>
       <label>Username / อีเมล
-        <input id="fUser" class="mono" autocomplete="off">
+        <input id="fUser" class="mono" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off">
       </label>
       <label>รหัสผ่าน
         <div class="row">
-          <input id="fPass" class="mono grow" type="text" autocomplete="off">
+          <input id="fPass" class="mono grow" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off">
           <button type="button" id="genBtn">สุ่มรหัส</button>
         </div>
       </label>
@@ -189,10 +192,10 @@ details summary{cursor:pointer;font-weight:500}
         <input id="fNote" autocomplete="off">
       </label>
       <label><span id="fKeyLabel">Key ของรายการนี้ (ใช้ดูรหัสผ่าน)</span>
-        <input id="fKey" type="password" autocomplete="new-password" placeholder="อย่างน้อย 6 ตัวอักษร">
+        <span class="keyfield"><input id="fKey" class="mono" type="text" autocomplete="off" data-shown placeholder="อย่างน้อย 6 ตัวอักษร" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>ซ่อน</button></span>
       </label>
       <label>พิมพ์ Key ของรายการอีกครั้ง
-        <input id="fKey2" type="password" autocomplete="new-password">
+        <span class="keyfield"><input id="fKey2" class="mono" type="text" autocomplete="off" data-shown spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>ซ่อน</button></span>
       </label>
       <p class="muted" style="font-size:.82rem">ถ้าลืม Key ของรายการ จะดูรหัสผ่านนี้ไม่ได้อีก แต่ยังลบรายการด้วย Master Key ได้</p>
       <div class="err" id="editErr"></div>
@@ -213,10 +216,10 @@ details summary{cursor:pointer;font-weight:500}
         <div class="row"><button id="exportBtn">คัดลอกข้อความสำรอง</button></div>
         <textarea id="importBox" placeholder="วางข้อความสำรองที่นี่เพื่อกู้คืน"></textarea>
         <label>Master Key ของข้อมูลสำรอง
-          <input id="importKey" type="password" autocomplete="off">
+          <span class="keyfield"><input id="importKey" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
         </label>
         <label id="importCurRow" hidden>Master Key ปัจจุบัน (เมื่อข้อมูลสำรองใช้ Key อื่น)
-          <input id="importCurKey" type="password" autocomplete="off">
+          <span class="keyfield"><input id="importCurKey" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"><button type="button" class="ghost" data-peekfor>แสดง</button></span>
         </label>
         <div class="confirm" id="importRow">
           <button id="importBtn">กู้คืนจากข้อความนี้</button>
