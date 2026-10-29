@@ -1,0 +1,33 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // หนึ่งผู้ใช้ = หนึ่งเอกสาร เก็บเฉพาะ blob ที่เข้ารหัสแล้ว
+    match /users/{uid} {
+      function isOwner() {
+        return request.auth != null && request.auth.uid == uid;
+      }
+      function validBlob() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['v', 'iter', 'salt', 'iv', 'ct', 'updatedAt'])
+          && d.keys().hasAll(['v', 'iter', 'salt', 'iv', 'ct', 'updatedAt'])
+          && d.v is int && d.v >= 1
+          && d.iter is int && d.iter >= 600000          // ห้ามลดรอบ PBKDF2
+          && d.salt is string && d.salt.size() >= 16 && d.salt.size() <= 64
+          && d.iv is string && d.iv.size() == 16          // 12 ไบต์ → base64 16 ตัว
+          && d.ct is string && d.ct.size() > 0 && d.ct.size() < 900000
+          && d.updatedAt == request.time;                 // ต้องเป็น serverTimestamp()
+      }
+
+      allow read: if isOwner();
+      allow create: if isOwner() && validBlob();
+      // IV ต้องเปลี่ยนทุกครั้งที่เขียน (กัน IV ซ้ำ)
+      allow update: if isOwner() && validBlob() && request.resource.data.iv != resource.data.iv;
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

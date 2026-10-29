@@ -1,0 +1,77 @@
+# ตู้นิรภัยรหัสผ่าน (ซิงก์ผ่าน Firebase)
+
+ตัวจัดการรหัสผ่านแบบ zero-knowledge: เข้ารหัสในเบราว์เซอร์ด้วย PBKDF2-SHA256 600,000 รอบ → AES-256-GCM แล้วซิงก์เฉพาะ blob ที่เข้ารหัสแล้วข้ามอุปกรณ์ผ่าน Firestore **Master Key และข้อมูลที่ยังไม่เข้ารหัสไม่ออกจากเบราว์เซอร์**
+
+## โครงสร้าง
+
+```
+public/
+  index.html          หน้าตา + CSS (ภาษาไทย)
+  app.js              UI, Firebase Auth, ซิงก์, จัดการการชนกัน
+  vault-core.js       การเข้ารหัส + รูปแบบข้อมูล + merge (ไม่แตะเครือข่าย)
+  firebase-config.js  ใส่ config ของโปรเจกต์ (หรือปล่อย null เมื่อ deploy บน Hosting)
+firestore.rules       Security Rules
+firebase.json         Hosting + Rules + security headers (CSP ฯลฯ)
+vault.html            เวอร์ชันเดิมแบบไฟล์เดียว (ไม่ซิงก์) เก็บไว้อ้างอิง
+```
+
+## ขั้นตอนติดตั้ง
+
+1. **สร้างโปรเจกต์** ที่ <https://console.firebase.google.com> → Add project
+2. **เพิ่ม Web app**: Project settings → Your apps → `</>` (ยังไม่ต้องติ๊ก Hosting ตรงนี้ก็ได้)
+3. **เปิด Authentication**: Build → Authentication → Get started → Sign-in method → **Google** → Enable
+   - ถ้าใช้โดเมนของตัวเอง ให้เพิ่มใน Authentication → Settings → **Authorized domains** (`localhost`, `<project>.web.app` และ `<project>.firebaseapp.com` มีให้อยู่แล้ว)
+4. **เปิด Firestore**: Build → Firestore Database → Create database → เลือก region → **Production mode**
+5. **ใส่ config** (เลือกอย่างใดอย่างหนึ่ง)
+   - ปล่อย `export const firebaseConfig = null;` ไว้ แล้ว deploy บน Firebase Hosting: แอปจะอ่าน config เองจาก `/__/firebase/init.json`
+   - หรือคัดลอก `firebaseConfig` จาก Project settings → Your apps ไปวางใน `public/firebase-config.js` (ใช้เมื่อโฮสต์ที่อื่น)
+   - ค่า `apiKey` ของ Firebase ไม่ใช่ความลับ ความปลอดภัยมาจาก Security Rules
+6. **ติดตั้ง CLI และ deploy**
+   ```bash
+   npm install -g firebase-tools
+   firebase login
+   firebase use --add            # เลือกโปรเจกต์ที่สร้างไว้
+   firebase deploy --only firestore:rules,hosting
+   ```
+7. เปิด `https://<project>.web.app` → เข้าสู่ระบบด้วย Google → ตั้ง Master Key
+
+### ทางเลือก: โฮสต์บน GitHub Pages แทน Firebase Hosting
+ยังใช้ Firebase Auth และ Firestore เหมือนเดิม เปลี่ยนแค่ที่วางหน้าเว็บ
+1. ทำข้อ 1–4 ด้านบน แล้ว**ต้อง**วาง `firebaseConfig` ลงใน `public/firebase-config.js` (GitHub Pages ไม่มี `/__/firebase/init.json`)
+2. ตั้ง Rules โดยไม่ต้องใช้ CLI: Firestore Database → แท็บ **Rules** → วางเนื้อหา `firestore.rules` ทั้งไฟล์ → **Publish**
+3. Authentication → Settings → **Authorized domains** → Add domain → `<github-username>.github.io`
+4. push ขึ้น GitHub แล้วไปที่ repo → Settings → Pages → Source: **GitHub Actions** จากนั้น workflow `.github/workflows/pages.yml` จะ deploy โฟลเดอร์ `public/` ทุกครั้งที่ push ขึ้น `main`
+5. เปิด `https://<github-username>.github.io/<repo>/`
+
+หมายเหตุ: บัญชี GitHub ฟรีเปิด Pages ได้เฉพาะ repo แบบ public ซึ่งการเปิดเผย `firebase-config.js` ไม่เป็นปัญหา (ดูข้อ 5 ด้านบน) แต่แนะนำให้จำกัด API key ให้ใช้ได้เฉพาะโดเมนของคุณ ที่ Google Cloud Console → APIs & Services → Credentials → Browser key → Website restrictions ส่วน CSP ใส่ไว้เป็น `<meta>` ใน `index.html` แล้ว (GitHub Pages ส่ง header เองไม่ได้)
+
+ทดสอบในเครื่อง: `firebase emulators:start --only hosting` แล้วเปิด `http://localhost:5000` (ใช้ Auth/Firestore ตัวจริงของโปรเจกต์)
+
+## การทำงาน
+
+### สิ่งที่เก็บบนคลาวด์
+`users/{uid}` → `{v, iter, salt, iv, ct, updatedAt}` เท่านั้น ไม่มี plaintext, ไม่มี Key และไม่มี hash ของ Key ส่วน Rules บังคับว่า
+- อ่านและเขียนได้เฉพาะเจ้าของ (`request.auth.uid == uid`) และห้ามลบ
+- มีฟิลด์ได้แค่ 6 ตัวนี้, `iter >= 600000`, `updatedAt` ต้องเป็นเวลาเซิร์ฟเวอร์
+- `iv` ต้องต่างจากของเดิมทุกครั้งที่อัปเดต (กัน IV ซ้ำ)
+
+### ข้อมูลในเครื่อง
+`localStorage["vault.v1:<uid>"]` = `{blob, base, dirty, replace}` ใช้เป็น cache ออฟไลน์ (แยกตามบัญชี) ทุกครั้งที่บันทึกจะเขียนลงเครื่องก่อน แล้วค่อยส่งขึ้น Firestore ถ้าออฟไลน์อยู่ ข้อมูลจะค้างสถานะ "รอซิงก์" และส่งให้เองเมื่อกลับมาออนไลน์ ถ้าเคยใช้ `vault.html` รุ่นเดิมในเบราว์เซอร์เดียวกัน ตู้เดิม (`vault.v1`) จะถูกย้ายเข้าบัญชีแรกที่เข้าสู่ระบบโดยอัตโนมัติ
+
+### กันการเขียนทับข้ามเครื่อง
+- ทุกเวอร์ชันมี `iv` สุ่มใหม่ ใช้ `iv` นี้เป็นตัวระบุเวอร์ชัน (`base`) ว่าข้อมูลในเครื่องสร้างต่อจากเวอร์ชันไหนบนคลาวด์
+- ตอนเขียนใช้ **Firestore transaction**: ถ้า `iv` บนคลาวด์ไม่ตรงกับ `base` แสดงว่ามีอุปกรณ์อื่นเขียนก่อน จึงยกเลิกการเขียน แล้วดึงเวอร์ชันนั้นมาถอดรหัสและ merge ก่อนเขียนใหม่ (ใช้ `iv` แทน `updatedAt` เพราะรู้ค่าได้ทันทีโดยไม่ต้องอ่านซ้ำหลังเขียน จึงไม่มีช่องว่างให้แข่งกันเขียน)
+- ขณะปลดล็อกอยู่ มี `onSnapshot` ฟังการเปลี่ยนแปลงแบบเรียลไทม์ อุปกรณ์อื่นแก้ไขเมื่อไหร่ รายการจะอัปเดตทันทีพร้อมแจ้งเตือน
+- **Merge** ทำในเบราว์เซอร์หลังถอดรหัส: แต่ละรายการมีเวลาแก้ไขล่าสุด (`mt`) อันที่ใหม่กว่าชนะ การลบเก็บเป็น tombstone (เก็บไว้ 1 ปี) เพื่อไม่ให้รายการที่ลบแล้วกลับมา ทั้ง `mt` และ tombstone อยู่ใน ciphertext คลาวด์จึงไม่เห็น
+- ถ้าคลาวด์ถูกเข้ารหัสด้วย **salt/Key อื่น** (เช่น อีกเครื่องกู้คืนข้อมูลสำรองที่ใช้ Key ต่างกัน) เครื่องนี้จะหยุดซิงก์และให้ผู้ใช้เลือกเองว่าจะ "รวมข้อมูล" (ใส่ Key ของคลาวด์) หรือ "เขียนทับคลาวด์"
+
+### รูปแบบ payload
+`v:2` เก็บ payload เป็น `{items:[{id,site,user,pass,note,mt}], tomb:{id:ms}}` ส่วน `v:1` (จาก `vault.html` เดิม) เป็นอาร์เรย์ของรายการ แอปยังอ่านข้อความสำรองแบบ `v:1` ได้
+
+### การกู้คืนจากข้อความสำรอง
+จะแทนที่ทั้งข้อมูลในเครื่องและบนคลาวด์หลังจากปลดล็อกด้วย Key ของข้อมูลสำรองได้สำเร็จ อุปกรณ์อื่นที่ใช้ Key เดียวกันจะ merge รายการที่ใหม่กว่าของตัวเองกลับเข้ามา ส่วนอุปกรณ์ที่ใช้ Key ต่างกันจะเห็นหน้าต่างให้ตัดสินใจ
+
+## หมายเหตุด้านความปลอดภัย
+- CSP ใน `firebase.json` อนุญาตเฉพาะ gstatic/Google APIs/Google Fonts ถ้าเปลี่ยน `authDomain` เป็นโดเมนของตัวเอง ให้เพิ่มโดเมนนั้นใน `frame-src`
+- Firebase SDK โหลดจาก `www.gstatic.com/firebasejs/10.14.1` ถ้าจะอัปเวอร์ชันให้แก้ค่า `FB` ใน `public/app.js`
+- ไม่มี service worker ต้องออนไลน์ตอนเปิดหน้าเว็บ แต่ถ้าเน็ตหลุดระหว่างใช้งาน ยังแก้ไขต่อได้และจะซิงก์เมื่อเน็ตกลับมา

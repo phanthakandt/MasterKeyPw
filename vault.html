@@ -1,0 +1,400 @@
+<title>ตู้นิรภัยรหัสผ่าน</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one narrow column like a safe-deposit ledger; lock screen → list of boxes, each with one-click copy chips */
+:root{
+  --bg:#ECEEEA; --surface:#F8F9F6; --line:#D3D7CF; --fg:#1D2420; --muted:#5E6862;
+  --brass:#8A5E14; --brass-soft:#F1E4CB; --danger:#A3352B; --ok:#2F6B45;
+  --sans:"IBM Plex Sans Thai",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#131715; --surface:#1B201D; --line:#2E3531; --fg:#E6E9E4; --muted:#97A19A;
+  --brass:#D8A64B; --brass-soft:#3A2F1A; --danger:#E0786C; --ok:#7CC496; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#131715; --surface:#1B201D; --line:#2E3531; --fg:#E6E9E4; --muted:#97A19A;
+  --brass:#D8A64B; --brass-soft:#3A2F1A; --danger:#E0786C; --ok:#7CC496; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:15px;line-height:1.55;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:28px 64px}
+.wrap{max-width:640px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+h1{font-size:1.6rem;font-weight:700;margin:0;text-wrap:balance;letter-spacing:-.01em}
+h2{font-size:1.1rem;margin:0;font-weight:600}
+p{margin:0}
+.muted{color:var(--muted)}
+.eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:var(--brass)}
+header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:20px;display:flex;flex-direction:column;gap:14px}
+label{font-size:.85rem;font-weight:500;display:flex;flex-direction:column;gap:6px}
+input,textarea{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:10px 12px;width:100%;min-width:0}
+textarea{font-family:var(--mono);font-size:.8rem;min-height:90px;resize:vertical}
+input:focus-visible,textarea:focus-visible,button:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+.mono{font-family:var(--mono)}
+button{font:inherit;cursor:pointer;border-radius:7px;border:1px solid var(--line);background:var(--surface);color:var(--fg);padding:9px 14px;font-weight:500}
+button:hover{border-color:var(--brass)}
+.primary{background:var(--brass);border-color:var(--brass);color:var(--surface);font-weight:600}
+.primary:hover{filter:brightness(1.08)}
+.danger{color:var(--danger)}
+.ghost{background:transparent;border-color:transparent;padding:6px 8px;color:var(--muted)}
+.ghost:hover{color:var(--fg);border-color:var(--line)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.row > *{min-width:0}
+.grow{flex:1 1 200px}
+.warn{background:var(--brass-soft);border-radius:8px;padding:12px 14px;font-size:.88rem}
+.err{color:var(--danger);font-size:.88rem;min-height:1.3em}
+.meter{height:5px;border-radius:3px;background:var(--line);overflow:hidden}
+.meter i{display:block;height:100%;width:0;background:var(--danger);transition:width .2s,background .2s}
+
+.toolbar{display:flex;gap:10px;flex-wrap:wrap}
+.toolbar input{flex:1 1 220px}
+.list{display:flex;flex-direction:column;gap:10px}
+.item{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.item-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.item-title{font-weight:600;font-size:1rem;overflow-wrap:anywhere}
+.item-note{font-size:.82rem;color:var(--muted);overflow-wrap:anywhere}
+.fields{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+@media (max-width:520px){.fields{grid-template-columns:1fr}}
+.chip{display:flex;align-items:center;gap:8px;text-align:left;padding:8px 10px;background:var(--bg);border:1px solid var(--line);border-radius:7px;min-width:0;width:100%}
+.chip .k{font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);flex:none;width:44px}
+.chip .v{font-family:var(--mono);font-size:.88rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.chip .c{font-size:.75rem;color:var(--brass);flex:none;font-weight:600}
+.chip.copied{border-color:var(--ok)}
+.chip.copied .c{color:var(--ok)}
+.pw-row{display:flex;gap:6px;min-width:0}
+.pw-row .chip{flex:1}
+.empty{text-align:center;padding:36px 16px;border:1px dashed var(--line);border-radius:10px;color:var(--muted)}
+.confirm{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:.88rem}
+.toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translateX(-50%) translateY(20px);opacity:0;
+  background:var(--fg);color:var(--bg);padding:9px 16px;border-radius:999px;font-size:.88rem;transition:all .2s;pointer-events:none;z-index:20}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.foot{font-size:.8rem;color:var(--muted);display:flex;flex-direction:column;gap:6px}
+details summary{cursor:pointer;font-weight:500}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow">AES-256-GCM · PBKDF2 600,000 รอบ</div>
+      <h1>ตู้นิรภัยรหัสผ่าน</h1>
+    </div>
+    <div class="row" id="topActions" hidden>
+      <span class="muted" id="countLabel" style="font-size:.85rem"></span>
+      <button id="lockBtn">ล็อกตู้</button>
+    </div>
+  </header>
+
+  <!-- ตั้ง Key ครั้งแรก -->
+  <section class="panel" id="setupView" hidden>
+    <h2>ตั้ง Master Key</h2>
+    <p class="muted">ข้อมูลทุกรายการจะถูกเข้ารหัสด้วย Key นี้ในเบราว์เซอร์ของคุณ ไม่มีการส่งไปที่ไหน</p>
+    <div class="warn"><strong>ถ้าลืม Key จะกู้ข้อมูลคืนไม่ได้เลย</strong> ไม่มีปุ่มรีเซ็ต ไม่มีใครถอดรหัสให้ได้ ควรจด Key ไว้ในที่ปลอดภัย</div>
+    <label>Master Key
+      <input id="setKey" type="password" autocomplete="new-password" placeholder="อย่างน้อย 8 ตัวอักษร ยิ่งยาวยิ่งดี">
+    </label>
+    <div class="meter"><i id="meterBar"></i></div>
+    <label>พิมพ์ Key อีกครั้ง
+      <input id="setKey2" type="password" autocomplete="new-password">
+    </label>
+    <div class="err" id="setupErr"></div>
+    <div class="row"><button class="primary" id="setupBtn">สร้างตู้นิรภัย</button></div>
+  </section>
+
+  <!-- ปลดล็อก -->
+  <section class="panel" id="unlockView" hidden>
+    <h2>ปลดล็อกตู้</h2>
+    <p class="muted">ใส่ Master Key เพื่อถอดรหัสรายการทั้งหมด</p>
+    <form id="unlockForm" class="row">
+      <input id="unlockKey" class="grow" type="password" autocomplete="current-password" placeholder="Master Key">
+      <button class="primary" id="unlockBtn" type="submit">ปลดล็อก</button>
+    </form>
+    <div class="err" id="unlockErr"></div>
+  </section>
+
+  <!-- ตู้ที่ปลดล็อกแล้ว -->
+  <section id="vaultView" hidden style="display:flex;flex-direction:column;gap:14px">
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="ค้นหาชื่อเว็บหรือ username">
+      <button class="primary" id="addBtn">+ เพิ่มรายการ</button>
+    </div>
+
+    <form class="panel" id="editForm" hidden>
+      <h2 id="editTitle">เพิ่มรายการ</h2>
+      <label>ชื่อเว็บ / แอป
+        <input id="fSite" required placeholder="เช่น Gmail, ธนาคาร, Shopee">
+      </label>
+      <label>Username / อีเมล
+        <input id="fUser" class="mono" autocomplete="off">
+      </label>
+      <label>รหัสผ่าน
+        <div class="row">
+          <input id="fPass" class="mono grow" type="text" autocomplete="off">
+          <button type="button" id="genBtn">สุ่มรหัส</button>
+        </div>
+      </label>
+      <label>หมายเหตุ (ไม่บังคับ)
+        <input id="fNote" autocomplete="off">
+      </label>
+      <div class="err" id="editErr"></div>
+      <div class="row">
+        <button class="primary" type="submit">บันทึก</button>
+        <button type="button" id="cancelBtn">ยกเลิก</button>
+      </div>
+    </form>
+
+    <div class="list" id="list"></div>
+  </section>
+
+  <div class="foot" id="foot" hidden>
+    <details>
+      <summary>สำรองข้อมูล / ย้ายเครื่อง</summary>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:10px">
+        <p>ข้อมูลเก็บไว้ในเบราว์เซอร์นี้เท่านั้น ถ้าล้างข้อมูลเบราว์เซอร์หรือเปลี่ยนเครื่อง ข้อมูลจะหายไป คัดลอกข้อความสำรองด้านล่าง (ยังเข้ารหัสอยู่) ไปเก็บไว้ แล้ววางกลับเมื่อต้องการกู้คืน ต้องใช้ Key เดิมเปิด</p>
+        <div class="row"><button id="exportBtn">คัดลอกข้อความสำรอง</button></div>
+        <textarea id="importBox" placeholder="วางข้อความสำรองที่นี่เพื่อกู้คืน"></textarea>
+        <div class="confirm" id="importRow">
+          <button id="importBtn">กู้คืนจากข้อความนี้</button>
+          <span class="err" id="importErr"></span>
+        </div>
+      </div>
+    </details>
+    <p>ตู้จะล็อกเองเมื่อไม่มีการใช้งาน 5 นาที</p>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(() => {
+  const STORE = 'vault.v1', ITER = 600000;
+  const $ = id => document.getElementById(id);
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+  let cryptoKey = null, salt = null, items = [], editingId = null, idleTimer = null, memVault = null;
+
+  const store = {
+    get(){ try { return JSON.parse(localStorage.getItem(STORE)); } catch { return memVault; } },
+    set(v){ memVault = v; try { localStorage.setItem(STORE, JSON.stringify(v)); return true; } catch { return false; } }
+  };
+
+  async function deriveKey(pass, saltBytes){
+    const base = await crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({name:'PBKDF2', salt:saltBytes, iterations:ITER, hash:'SHA-256'},
+      base, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+  }
+  async function encryptAll(){
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({name:'AES-GCM', iv}, cryptoKey, enc.encode(JSON.stringify(items)));
+    return {v:1, iter:ITER, salt:b64(salt), iv:b64(iv), ct:b64(ct)};
+  }
+  async function decryptVault(v, pass){
+    const s = unb64(v.salt);
+    const key = await deriveKey(pass, s);
+    const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv:unb64(v.iv)}, key, unb64(v.ct));
+    return {key, salt:s, items: JSON.parse(dec.decode(pt))};
+  }
+  async function persist(){
+    const ok = store.set(await encryptAll());
+    if (!ok) toast('เบราว์เซอร์นี้ไม่ให้บันทึกถาวร กรุณาสำรองข้อมูลไว้');
+  }
+
+  // ---------- views ----------
+  function show(view){
+    $('setupView').hidden = view !== 'setup';
+    $('unlockView').hidden = view !== 'unlock';
+    $('vaultView').hidden = view !== 'vault';
+    $('topActions').hidden = view !== 'vault';
+    $('foot').hidden = view !== 'vault';
+    if (view === 'setup') $('setKey').focus();
+    if (view === 'unlock') $('unlockKey').focus();
+  }
+  function lock(){
+    cryptoKey = null; items = []; editingId = null;
+    $('list').innerHTML = ''; $('editForm').hidden = true; $('unlockKey').value = '';
+    show(store.get() ? 'unlock' : 'setup');
+  }
+
+  // ---------- setup ----------
+  function strength(p){
+    let s = 0;
+    if (p.length >= 8) s++; if (p.length >= 12) s++; if (p.length >= 16) s++;
+    if (/[a-z]/.test(p) && /[A-Z]/.test(p)) s++; if (/\d/.test(p)) s++; if (/[^A-Za-z0-9]/.test(p)) s++;
+    return Math.min(s, 5);
+  }
+  $('setKey').addEventListener('input', e => {
+    const s = strength(e.target.value), bar = $('meterBar');
+    bar.style.width = (s/5*100)+'%';
+    bar.style.background = s <= 2 ? 'var(--danger)' : s <= 3 ? 'var(--brass)' : 'var(--ok)';
+  });
+  $('setupBtn').addEventListener('click', async () => {
+    const a = $('setKey').value, b = $('setKey2').value, err = $('setupErr');
+    if (a.length < 8) return err.textContent = 'Key ต้องยาวอย่างน้อย 8 ตัวอักษร';
+    if (a !== b) return err.textContent = 'Key ทั้งสองช่องไม่ตรงกัน ลองพิมพ์ใหม่';
+    err.textContent = ''; $('setupBtn').disabled = true; $('setupBtn').textContent = 'กำลังสร้าง…';
+    salt = crypto.getRandomValues(new Uint8Array(16));
+    cryptoKey = await deriveKey(a, salt);
+    items = [];
+    await persist();
+    $('setKey').value = $('setKey2').value = '';
+    $('setupBtn').disabled = false; $('setupBtn').textContent = 'สร้างตู้นิรภัย';
+    enterVault();
+  });
+
+  // ---------- unlock ----------
+  $('unlockForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = $('unlockBtn'), err = $('unlockErr');
+    btn.disabled = true; btn.textContent = 'กำลังถอดรหัส…'; err.textContent = '';
+    try {
+      const r = await decryptVault(store.get(), $('unlockKey').value);
+      cryptoKey = r.key; salt = r.salt; items = r.items;
+      $('unlockKey').value = '';
+      enterVault();
+    } catch {
+      err.textContent = 'Key ไม่ถูกต้อง ถอดรหัสไม่ได้';
+      $('unlockKey').select();
+    }
+    btn.disabled = false; btn.textContent = 'ปลดล็อก';
+  });
+
+  function enterVault(){ show('vault'); render(); resetIdle(); }
+  $('lockBtn').addEventListener('click', () => { lock(); toast('ล็อกแล้ว'); });
+
+  // ---------- list ----------
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  function render(){
+    const q = $('search').value.trim().toLowerCase();
+    const list = items.filter(i => !q || i.site.toLowerCase().includes(q) || (i.user||'').toLowerCase().includes(q))
+                      .sort((a,b) => a.site.localeCompare(b.site, 'th'));
+    $('countLabel').textContent = items.length + ' รายการ';
+    if (!items.length){
+      $('list').innerHTML = '<div class="empty">ตู้ยังว่างอยู่<br>กด <strong>+ เพิ่มรายการ</strong> เพื่อฝาก username และรหัสผ่านแรก</div>';
+      return;
+    }
+    if (!list.length){ $('list').innerHTML = '<div class="empty">ไม่พบรายการที่ตรงกับคำค้น</div>'; return; }
+    $('list').innerHTML = list.map(i => `
+      <article class="item" data-id="${i.id}">
+        <div class="item-head">
+          <span class="item-title">${esc(i.site)}</span>
+          <span class="row" style="gap:2px;flex-wrap:nowrap">
+            <button class="ghost" data-act="edit">แก้ไข</button>
+            <button class="ghost" data-act="del">ลบ</button>
+          </span>
+        </div>
+        <div class="fields">
+          <button class="chip" data-act="copy" data-f="user" title="คลิกเพื่อคัดลอก username">
+            <span class="k">User</span><span class="v">${esc(i.user) || '<span class="muted">—</span>'}</span><span class="c">คัดลอก</span>
+          </button>
+          <div class="pw-row">
+            <button class="chip" data-act="copy" data-f="pass" title="คลิกเพื่อคัดลอกรหัสผ่าน">
+              <span class="k">Pass</span><span class="v" data-pw>••••••••••</span><span class="c">คัดลอก</span>
+            </button>
+            <button class="ghost" data-act="peek" aria-label="แสดงรหัสผ่าน">ดู</button>
+          </div>
+        </div>
+        ${i.note ? `<div class="item-note">${esc(i.note)}</div>` : ''}
+        <div class="confirm" data-confirm hidden>
+          <span>ลบ “${esc(i.site)}” ถาวร?</span>
+          <button class="danger" data-act="delyes">ลบเลย</button>
+          <button data-act="delno">ไม่ลบ</button>
+        </div>
+      </article>`).join('');
+  }
+  $('search').addEventListener('input', render);
+
+  $('list').addEventListener('click', async e => {
+    const btn = e.target.closest('[data-act]'); if (!btn) return;
+    const card = btn.closest('.item'), item = items.find(i => i.id === card.dataset.id);
+    const act = btn.dataset.act;
+    if (act === 'copy'){
+      const val = btn.dataset.f === 'user' ? item.user : item.pass;
+      if (!val) return toast('ช่องนี้ว่างอยู่');
+      await copy(val);
+      btn.classList.add('copied'); btn.querySelector('.c').textContent = 'คัดลอกแล้ว';
+      setTimeout(() => { btn.classList.remove('copied'); btn.querySelector('.c').textContent = 'คัดลอก'; }, 1500);
+      toast(btn.dataset.f === 'user' ? 'คัดลอก username แล้ว' : 'คัดลอกรหัสผ่านแล้ว');
+    }
+    if (act === 'peek'){
+      const v = card.querySelector('[data-pw]'), shown = btn.textContent === 'ซ่อน';
+      v.textContent = shown ? '••••••••••' : (item.pass || '—');
+      btn.textContent = shown ? 'ดู' : 'ซ่อน';
+    }
+    if (act === 'edit') openEditor(item);
+    if (act === 'del') card.querySelector('[data-confirm]').hidden = false;
+    if (act === 'delno') card.querySelector('[data-confirm]').hidden = true;
+    if (act === 'delyes'){
+      items = items.filter(i => i.id !== item.id);
+      await persist(); render(); toast('ลบแล้ว');
+    }
+  });
+
+  async function copy(text){
+    try { await navigator.clipboard.writeText(text); return; } catch {}
+    const t = document.createElement('textarea');
+    t.value = text; t.setAttribute('readonly',''); t.style.position='fixed'; t.style.opacity='0';
+    document.body.appendChild(t); t.select();
+    try { document.execCommand('copy'); } catch {}
+    t.remove();
+  }
+
+  // ---------- editor ----------
+  function openEditor(item){
+    editingId = item ? item.id : null;
+    $('editTitle').textContent = item ? 'แก้ไขรายการ' : 'เพิ่มรายการ';
+    $('fSite').value = item?.site || ''; $('fUser').value = item?.user || '';
+    $('fPass').value = item?.pass || ''; $('fNote').value = item?.note || '';
+    $('editErr').textContent = '';
+    $('editForm').hidden = false; $('fSite').focus();
+  }
+  $('addBtn').addEventListener('click', () => openEditor(null));
+  $('cancelBtn').addEventListener('click', () => { $('editForm').hidden = true; });
+  $('genBtn').addEventListener('click', () => {
+    const cs = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*-_+=?';
+    const r = crypto.getRandomValues(new Uint32Array(20));
+    $('fPass').value = Array.from(r, x => cs[x % cs.length]).join('');
+  });
+  $('editForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const site = $('fSite').value.trim();
+    if (!site) return $('editErr').textContent = 'ใส่ชื่อเว็บหรือแอปก่อนบันทึก';
+    const data = {site, user:$('fUser').value.trim(), pass:$('fPass').value, note:$('fNote').value.trim()};
+    if (editingId) Object.assign(items.find(i => i.id === editingId), data);
+    else items.push({id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random()), ...data});
+    await persist();
+    $('editForm').hidden = true; render(); toast('บันทึกและเข้ารหัสแล้ว');
+  });
+
+  // ---------- backup ----------
+  $('exportBtn').addEventListener('click', async () => {
+    await copy(JSON.stringify(await encryptAll()));
+    toast('คัดลอกข้อความสำรองแล้ว นำไปเก็บไว้ในที่ปลอดภัย');
+  });
+  let importArmed = false;
+  $('importBtn').addEventListener('click', () => {
+    const err = $('importErr');
+    let v; try { v = JSON.parse($('importBox').value); } catch {}
+    if (!v || !v.salt || !v.iv || !v.ct) return err.textContent = 'ข้อความนี้ไม่ใช่ข้อความสำรองของตู้นี้';
+    if (!importArmed){ importArmed = true; $('importBtn').textContent = 'ยืนยัน: แทนที่ข้อมูลปัจจุบัน'; err.textContent = 'ข้อมูลในตู้ตอนนี้จะถูกแทนที่'; return; }
+    store.set(v); importArmed = false; $('importBox').value = '';
+    $('importBtn').textContent = 'กู้คืนจากข้อความนี้'; err.textContent = '';
+    lock(); toast('กู้คืนแล้ว ใส่ Key ของข้อมูลสำรองเพื่อเปิด');
+  });
+
+  // ---------- auto-lock ----------
+  function resetIdle(){
+    clearTimeout(idleTimer);
+    if (cryptoKey) idleTimer = setTimeout(() => { lock(); toast('ล็อกอัตโนมัติแล้ว'); }, 5*60*1000);
+  }
+  ['click','keydown','pointermove','touchstart'].forEach(ev => document.addEventListener(ev, resetIdle, {passive:true}));
+
+  let tt; function toast(msg){
+    const t = $('toast'); t.textContent = msg; t.classList.add('show');
+    clearTimeout(tt); tt = setTimeout(() => t.classList.remove('show'), 1900);
+  }
+
+  if (!crypto.subtle){ document.querySelector('.wrap').insertAdjacentHTML('beforeend','<div class="warn">เบราว์เซอร์นี้ไม่รองรับการเข้ารหัส กรุณาเปิดด้วยเบราว์เซอร์รุ่นใหม่</div>'); return; }
+  lock();
+})();
+</script>
